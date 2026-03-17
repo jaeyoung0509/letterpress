@@ -68,6 +68,38 @@ var (
 					BorderForeground(lipgloss.Color("78")).
 					Foreground(lipgloss.Color("84"))
 
+	subCardStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("239")).
+			Padding(1, 1)
+
+	subCardFocusedStyle = subCardStyle.Copy().
+				BorderForeground(lipgloss.Color("111"))
+
+	templateCardStyle = subCardStyle.Copy().
+				Width(28)
+
+	templateCardSelectedStyle = templateCardStyle.Copy().
+					BorderForeground(lipgloss.Color("78"))
+
+	templateCardFocusedStyle = templateCardSelectedStyle.Copy().
+					BorderForeground(lipgloss.Color("117")).
+					Bold(true)
+
+	previewFrameStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("244")).
+				Padding(1, 2)
+
+	pagePreviewStyle = lipgloss.NewStyle().
+				Border(lipgloss.NormalBorder()).
+				BorderForeground(lipgloss.Color("247")).
+				Padding(0, 1)
+
+	eyebrowStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("151")).
+			Bold(true)
+
 	modalStyle = lipgloss.NewStyle().
 			Border(lipgloss.DoubleBorder()).
 			BorderForeground(lipgloss.Color("111")).

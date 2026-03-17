@@ -731,89 +731,109 @@ func (m Model) renderSteps() string {
 
 func (m Model) renderQuickStartStep() string {
 	contentWidth := max(60, m.fullPanelWidth()-8)
+	entry, _ := m.currentTemplateEntry()
+	stack := m.width < 155
 	leftWidth := contentWidth
 	rightWidth := 0
-	stack := m.width < 150
 	if !stack {
-		leftWidth = max(44, int(float64(contentWidth)*0.58))
-		rightWidth = max(30, contentWidth-leftWidth-4)
+		leftWidth = max(58, int(float64(contentWidth)*0.57))
+		rightWidth = max(34, contentWidth-leftWidth-4)
 	}
 
-	listView := m.templateList
-	listView.SetSize(max(28, leftWidth-6), min(8, max(4, len(m.templates)+2)))
-
-	entry, _ := m.currentTemplateEntry()
-	left := strings.Join([]string{
+	header := strings.Join([]string{
 		sectionTitleStyle.Render("1. Quick Start"),
-		mutedStyle.Render("Choose the essentials first: template, page, text import, image, and output."),
-		"",
-		m.renderQuickTemplateBlock(entry, listView),
-		"",
-		m.renderQuickBodyImportBlock(),
-		"",
-		m.renderQuickPrimaryImageBlock(entry),
-		renderStatusBlock(m.status(StepQuickStart)),
+		mutedStyle.Render("Pick the template, bring in text and an image, then export with the suggested defaults."),
 	}, "\n")
 
-	right := strings.Join([]string{
-		m.renderQuickPageBlock(entry),
+	top := joinPanels(
+		m.renderQuickTemplateBlock(entry, leftWidth),
+		m.renderLivePreviewCard(entry, rightWidth),
+		contentWidth,
+	)
+
+	bottom := joinPanels(
+		strings.Join([]string{
+			m.renderQuickPageBlock(entry),
+			"",
+			m.renderQuickBodyImportBlock(),
+		}, "\n"),
+		strings.Join([]string{
+			m.renderQuickPrimaryImageBlock(entry),
+			"",
+			m.renderQuickOutputBlock(),
+			"",
+			m.renderQuickReadiness(entry),
+		}, "\n"),
+		contentWidth,
+	)
+
+	parts := []string{
+		header,
 		"",
-		m.renderQuickOutputBlock(),
+		top,
 		"",
-		m.renderQuickChecklist(entry),
+		bottom,
+		renderStatusBlock(m.status(StepQuickStart)),
 		"",
 		m.renderNavigation(false, true),
-	}, "\n")
+	}
 
 	if stack {
-		return lipgloss.JoinVertical(lipgloss.Left, left, "", right)
+		return strings.Join(parts, "\n")
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Width(leftWidth).Render(left), "  ", lipgloss.NewStyle().Width(rightWidth).Render(right))
+
+	return strings.Join(parts, "\n")
 }
 
-func (m Model) renderQuickTemplateBlock(entry TemplateEntry, listView list.Model) string {
+func (m Model) renderQuickTemplateBlock(entry TemplateEntry, width int) string {
+	cardWidth := max(26, min(32, width/2-3))
+	cards := make([]string, 0, len(m.templates))
+	for idx, candidate := range m.templates {
+		selected := idx == m.templateIndex
+		cards = append(cards, m.renderTemplateCard(candidate, cardWidth, selected, m.focused == focusQuickTemplateList && selected))
+	}
+
 	lines := []string{
-		labelStyle.Render("Template"),
-		listView.View(),
+		labelStyle.Render("Templates"),
+		mutedStyle.Render("Use Up/Down to move between cards, then Tab into the rest of the setup."),
 		"",
-		mutedStyle.Render(fmt.Sprintf("Category: %s", entry.Category)),
-		mutedStyle.Render(fmt.Sprintf("Supported sizes: %s", formatSizes(entry.SupportedSizes))),
 	}
 
-	if len(entry.ImageSlots) > 0 {
-		lines = append(lines, mutedStyle.Render(fmt.Sprintf("Image slots: %d", len(entry.ImageSlots))))
-	}
-	if len(entry.DecorationAssets) > 0 {
-		lines = append(lines, mutedStyle.Render(fmt.Sprintf("Decoration assets: %d", len(entry.DecorationAssets))))
+	if width < 76 {
+		lines = append(lines, strings.Join(cards, "\n\n"))
+	} else {
+		lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top, cards...))
 	}
 
-	if m.focused == focusQuickTemplateList {
-		return focusedBlockStyle.Render(strings.Join(lines, "\n"))
-	}
+	lines = append(lines,
+		"",
+		eyebrowStyle.Render("Selected default"),
+		fmt.Sprintf("%s · %s · %s", entry.ID, entry.Category, formatSizes(entry.SupportedSizes)),
+	)
+
 	return strings.Join(lines, "\n")
 }
 
 func (m Model) renderQuickPageBlock(entry TemplateEntry) string {
-	lines := []string{
+	body := strings.Join([]string{
 		labelStyle.Render("Page"),
 		m.renderOptionGroup("Paper size", entry.SupportedSizes, string(m.composition.Project.Page.Size), m.focused == focusQuickPageSize),
 		"",
 		m.renderOrientationGroup(m.focused == focusQuickOrientation),
-	}
-	return strings.Join(lines, "\n")
+	}, "\n")
+	return subCardStyle.Width(max(30, m.fullPanelWidth()/2-10)).Render(body)
 }
 
 func (m Model) renderQuickBodyImportBlock() string {
-	lines := []string{
+	body := strings.Join([]string{
 		labelStyle.Render("Text file (.txt / .md)"),
 		m.bodyImportInput.View() + " " + m.renderButton("Browse", m.focused == focusQuickBodyBrowse, false),
-		mutedStyle.Render("Press Enter in the field to import the current path into the body."),
-	}
-
+		mutedStyle.Render("Press Enter in the field to apply the typed path into the body."),
+	}, "\n")
 	if m.focused == focusQuickBodyImport || m.focused == focusQuickBodyBrowse {
-		return focusedBlockStyle.Render(strings.Join(lines, "\n"))
+		return subCardFocusedStyle.Width(max(30, m.fullPanelWidth()/2-10)).Render(body)
 	}
-	return strings.Join(lines, "\n")
+	return subCardStyle.Width(max(30, m.fullPanelWidth()/2-10)).Render(body)
 }
 
 func (m Model) renderQuickPrimaryImageBlock(entry TemplateEntry) string {
@@ -822,30 +842,29 @@ func (m Model) renderQuickPrimaryImageBlock(entry TemplateEntry) string {
 		label = "Primary image (" + slot.ID + ")"
 	}
 
-	lines := []string{
+	body := strings.Join([]string{
 		labelStyle.Render(label),
 		m.primaryImageInput.View() + " " + m.renderButton("Browse", m.focused == focusQuickPrimaryBrowse, false),
-		mutedStyle.Render("Press Enter in the field to bind the typed path, or browse for a file."),
-	}
-
+		mutedStyle.Render("Press Enter in the field to bind the current path."),
+	}, "\n")
 	if m.focused == focusQuickPrimaryImage || m.focused == focusQuickPrimaryBrowse {
-		return focusedBlockStyle.Render(strings.Join(lines, "\n"))
+		return subCardFocusedStyle.Width(max(30, m.fullPanelWidth()/2-10)).Render(body)
 	}
-	return strings.Join(lines, "\n")
+	return subCardStyle.Width(max(30, m.fullPanelWidth()/2-10)).Render(body)
 }
 
 func (m Model) renderQuickOutputBlock() string {
-	lines := []string{
+	body := strings.Join([]string{
 		labelStyle.Render("Output"),
 		m.renderFormatSelector(m.focused == focusQuickExportFormat),
 		"",
 		m.renderFieldBlock("Output path", m.outputInput.View(), m.focused == focusQuickOutputPath),
 		mutedStyle.Render("Recommended: " + m.suggestedOutputPath),
-	}
-	return strings.Join(lines, "\n")
+	}, "\n")
+	return subCardStyle.Width(max(30, m.fullPanelWidth()/2-10)).Render(body)
 }
 
-func (m Model) renderQuickChecklist(entry TemplateEntry) string {
+func (m Model) renderQuickReadiness(entry TemplateEntry) string {
 	bodyState := "optional, edit later"
 	if path := strings.TrimSpace(m.composition.BodyImportPath); path != "" {
 		bodyState = "imported from " + summarizeText(path)
@@ -863,15 +882,231 @@ func (m Model) renderQuickChecklist(entry TemplateEntry) string {
 		outputState = "ready"
 	}
 
-	lines := []string{
+	body := strings.Join([]string{
 		labelStyle.Render("Ready Check"),
 		"Template: selected",
 		fmt.Sprintf("Page: %s %s", m.composition.Project.Page.Size, m.composition.Project.Page.Orientation),
 		"Body: " + bodyState,
 		"Primary image: " + imageState,
 		"Output: " + outputState,
+	}, "\n")
+	return subCardStyle.Width(max(30, m.fullPanelWidth()/2-10)).Render(body)
+}
+
+func (m Model) renderTemplateCard(entry TemplateEntry, width int, selected, focused bool) string {
+	style := templateCardStyle.Width(width)
+	switch {
+	case selected && focused:
+		style = templateCardFocusedStyle.Width(width)
+	case selected:
+		style = templateCardSelectedStyle.Width(width)
+	case focused:
+		style = subCardFocusedStyle.Width(width)
 	}
-	return strings.Join(lines, "\n")
+
+	features := []string{"TEXT"}
+	if len(entry.ImageSlots) > 0 {
+		features = append(features, fmt.Sprintf("IMG %d", len(entry.ImageSlots)))
+	}
+	if len(entry.DecorationAssets) > 0 {
+		features = append(features, fmt.Sprintf("DECOR %d", len(entry.DecorationAssets)))
+	}
+
+	lines := []string{
+		eyebrowStyle.Render(strings.ToUpper(entry.Category)),
+		labelStyle.Render(entry.ID),
+		mutedStyle.Render("Sizes: " + formatSizes(entry.SupportedSizes)),
+		mutedStyle.Render("Features: " + strings.Join(features, " · ")),
+	}
+	if selected {
+		lines = append(lines, successStyle.Render("Selected"))
+	}
+
+	return style.Render(strings.Join(lines, "\n"))
+}
+
+func (m Model) renderLivePreviewCard(entry TemplateEntry, width int) string {
+	if width <= 0 {
+		width = max(34, m.fullPanelWidth()/2-10)
+	}
+
+	previewWidth := max(28, width-4)
+	lines := []string{
+		eyebrowStyle.Render("LIVE PREVIEW"),
+		labelStyle.Render(entry.ID),
+		mutedStyle.Render(fmt.Sprintf("%s %s", m.composition.Project.Page.Size, m.composition.Project.Page.Orientation)),
+		"",
+		pagePreviewStyle.Width(previewWidth).Render(m.renderPreviewPage(entry, previewWidth-4)),
+		"",
+		mutedStyle.Render("This is schematic. Export output stays the source of truth."),
+	}
+
+	return previewFrameStyle.Width(max(32, width)).Render(strings.Join(lines, "\n"))
+}
+
+func (m Model) renderPreviewPage(entry TemplateEntry, width int) string {
+	innerWidth := max(20, width)
+	rows := make([]string, 0, 12)
+
+	if m.composition.Project.Options.Decorations && len(entry.DecorationAssets) > 0 {
+		rows = append(rows, centerPreview("ornaments enabled", innerWidth))
+	}
+
+	if previewHasTextRole(entry, "title", "heading", "headline", "greeting") {
+		rows = append(rows, alignPreview(previewPrimaryText(entry, m.composition.Project.Content.Title, "Title"), innerWidth, "center"))
+		rows = append(rows, strings.Repeat("─", max(10, innerWidth-2)))
+	}
+
+	if len(entry.ImageSlots) > 0 {
+		rows = append(rows, previewImageBox(m.previewImageLabel(entry), innerWidth))
+	}
+
+	if previewHasTextRole(entry, "body", "message", "note") {
+		body := previewPrimaryText(entry, m.composition.Project.Content.Body, "Body text")
+		rows = append(rows, wrapPreviewText(body, innerWidth, 4)...)
+	}
+
+	if previewHasTextRole(entry, "signature", "signoff", "closing") {
+		rows = append(rows, "")
+		rows = append(rows, alignPreview(previewPrimaryText(entry, m.composition.Project.Content.Signature, "Signature"), innerWidth, "right"))
+	}
+
+	targetHeight := 12
+	if m.composition.Project.Page.Orientation == domain.OrientationLandscape {
+		targetHeight = 9
+	}
+	for len(rows) < targetHeight {
+		rows = append(rows, "")
+	}
+
+	return strings.Join(rows[:targetHeight], "\n")
+}
+
+func (m Model) previewImageLabel(entry TemplateEntry) string {
+	slot, ok := entry.PrimaryImageSlot()
+	if !ok {
+		return "No image"
+	}
+	path := strings.TrimSpace(m.composition.ImagePath(slot.ID))
+	if path == "" {
+		return "Add image"
+	}
+	return filepath.Base(path)
+}
+
+func previewHasTextRole(entry TemplateEntry, roles ...string) bool {
+	for _, slot := range entry.Template.Slots {
+		if slot.Type != domain.SlotTypeText {
+			continue
+		}
+		id := strings.ToLower(strings.TrimSpace(slot.ID))
+		for _, role := range roles {
+			if id == role {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func previewPrimaryText(entry TemplateEntry, value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func previewImageBox(label string, width int) string {
+	boxWidth := max(12, width-2)
+	top := "┌" + strings.Repeat("─", boxWidth-2) + "┐"
+	middle := "│" + padPreview(centerPreview("Image", boxWidth-2), boxWidth-2) + "│"
+	bottom := "└" + strings.Repeat("─", boxWidth-2) + "┘"
+	caption := centerPreview(label, width)
+	return strings.Join([]string{top, middle, bottom, caption}, "\n")
+}
+
+func wrapPreviewText(text string, width, lines int) []string {
+	words := strings.Fields(strings.TrimSpace(text))
+	if len(words) == 0 {
+		return []string{mutedStyle.Render("(empty body)")}
+	}
+
+	out := make([]string, 0, lines)
+	current := ""
+	for _, word := range words {
+		candidate := word
+		if current != "" {
+			candidate = current + " " + word
+		}
+		if len(candidate) > width && current != "" {
+			out = append(out, current)
+			current = word
+			if len(out) == lines {
+				break
+			}
+			continue
+		}
+		current = candidate
+	}
+	if len(out) < lines && current != "" {
+		out = append(out, current)
+	}
+	if len(out) > lines {
+		out = out[:lines]
+	}
+	if len(out) == lines && len(words) > 0 {
+		last := out[len(out)-1]
+		if len(last) > width-1 {
+			last = last[:max(0, width-1)]
+		}
+		if !strings.HasSuffix(last, "...") && len(strings.Fields(text)) > len(strings.Fields(strings.Join(out, " "))) {
+			last = strings.TrimRight(last, " ") + "..."
+		}
+		out[len(out)-1] = last
+	}
+	return out
+}
+
+func alignPreview(text string, width int, mode string) string {
+	text = summarizeTextForWidth(text, width)
+	padding := max(0, width-len(text))
+	switch mode {
+	case "center":
+		left := padding / 2
+		right := padding - left
+		return strings.Repeat(" ", left) + text + strings.Repeat(" ", right)
+	case "right":
+		return strings.Repeat(" ", padding) + text
+	default:
+		return text + strings.Repeat(" ", padding)
+	}
+}
+
+func centerPreview(text string, width int) string {
+	return alignPreview(text, width, "center")
+}
+
+func padPreview(text string, width int) string {
+	text = summarizeTextForWidth(text, width)
+	if len(text) < width {
+		return text + strings.Repeat(" ", width-len(text))
+	}
+	return text
+}
+
+func summarizeTextForWidth(text string, width int) string {
+	text = strings.TrimSpace(text)
+	if width <= 0 {
+		return ""
+	}
+	if len(text) <= width {
+		return text
+	}
+	if width <= 3 {
+		return text[:width]
+	}
+	return text[:width-3] + "..."
 }
 
 func (m Model) renderEditStep() string {
@@ -1009,7 +1244,11 @@ func (m Model) renderReviewStep() string {
 }
 
 func (m Model) renderSidebar() string {
-	blocks := []string{m.renderSummary()}
+	entry, _ := m.currentTemplateEntry()
+	blocks := []string{
+		m.renderLivePreviewCard(entry, max(30, m.summaryWidth()-8)),
+		m.renderSummary(),
+	}
 
 	switch m.state.Current {
 	case StepEdit:
@@ -1047,23 +1286,18 @@ func (m Model) renderSummary() string {
 	}
 
 	lines := []string{
-		sectionTitleStyle.Render("Summary"),
+		sectionTitleStyle.Render("Session"),
 		"",
 		labelStyle.Render("Template"),
 		entry.ID,
-		"",
 		labelStyle.Render("Page"),
 		fmt.Sprintf("%s %s", m.composition.Project.Page.Size, m.composition.Project.Page.Orientation),
-		"",
 		labelStyle.Render("Body import"),
 		m.bodyImportSummary(),
-		"",
 		labelStyle.Render("Primary image"),
 		primary,
-		"",
 		labelStyle.Render("Decorations"),
 		fmt.Sprintf("%d selected", m.composition.DecorationCount()),
-		"",
 		labelStyle.Render("Export"),
 		fmt.Sprintf("%s -> %s", strings.ToUpper(string(m.composition.Project.Export.Format)), summarizeText(m.composition.Project.Export.Out)),
 	}
