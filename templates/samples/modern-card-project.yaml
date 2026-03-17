@@ -1,0 +1,16 @@
+version: 1
+template: modern-card-a6
+page:
+  size: A6
+  orientation: landscape
+content:
+  title: "For You"
+  body: "May every moment be as special as you are. This little card holds my gratitude in vivid color."
+options:
+  decorations: true
+images:
+  - slot: artwork
+    path: ../assets/sample-photo.jpg
+export:
+  format: png
+  out: outputs/modern-card.png

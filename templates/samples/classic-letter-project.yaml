@@ -1,0 +1,16 @@
+version: 1
+template: classic-letter-a4
+page:
+  size: A4
+  orientation: portrait
+content:
+  title: "Dear Friend"
+  body: |
+    I hope this letter finds you in great spirits. Just a quick note to tell you
+    how much I appreciate your constant support and good cheer.
+  signature: "Warmly, Alex"
+options:
+  decorations: true
+export:
+  format: pdf
+  out: outputs/classic-letter.pdf

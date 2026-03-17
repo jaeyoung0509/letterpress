@@ -1,0 +1,42 @@
+version: 1
+id: modern-card-a6
+page:
+  supported_sizes: [A6]
+  default_orientation: landscape
+layout:
+  margin_mm: 8
+slots:
+  - id: artwork
+    type: image
+    x_mm: 10
+    y_mm: 10
+    w_mm: 120
+    h_mm: 80
+    fit: contain
+  - id: greeting
+    type: text
+    x_mm: 10
+    y_mm: 95
+    w_mm: 120
+    h_mm: 20
+    style: greeting
+  - id: note
+    type: text
+    x_mm: 10
+    y_mm: 118
+    w_mm: 120
+    h_mm: 25
+    style: note
+assets:
+  - id: ribbon
+    kind: decoration
+    path: ../assets/ribbon.svg
+styles:
+  greeting:
+    font: SerifDisplay
+    size_pt: 18
+    align: center
+  note:
+    font: SansBody
+    size_pt: 11
+    align: center
