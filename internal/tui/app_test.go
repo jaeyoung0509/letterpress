@@ -1,265 +1,231 @@
 package tui
 
 import (
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	asciipkg "github.com/jaeyoung0509/letterpress/internal/ascii"
 	"github.com/jaeyoung0509/letterpress/internal/domain"
-	"github.com/jaeyoung0509/letterpress/internal/export"
-	templatepkg "github.com/jaeyoung0509/letterpress/internal/template"
+	exportpkg "github.com/jaeyoung0509/letterpress/internal/export"
+	renderpkg "github.com/jaeyoung0509/letterpress/internal/render"
 )
 
-func TestViewShowsQuickStartScaffold(t *testing.T) {
+func TestViewShowsSlashCommandScaffold(t *testing.T) {
 	view := NewModel().View()
 
 	for _, fragment := range []string{
 		"letterpress",
-		"Quick Start",
-		"Edit Content",
-		"Style & Decorations",
-		"Review & Export",
-		"Live Preview",
-		"Template",
-		"Text file (.txt / .md)",
-		"Output",
+		"ASCII Preview",
+		"Current State",
+		"Command",
+		"/image <path>",
+		"/export pdf",
 	} {
-		if !strings.Contains(strings.ToLower(view), strings.ToLower(fragment)) {
+		if !strings.Contains(view, fragment) {
 			t.Fatalf("expected view to contain %q, got %q", fragment, view)
 		}
 	}
 }
 
-func TestFocusMovementAndStepProgression(t *testing.T) {
+func TestParseSlashCommandSupportsQuotedArguments(t *testing.T) {
+	command, err := parseSlashCommand(`/charset "@#S%?*+;:,. "`)
+	if err != nil {
+		t.Fatalf("parseSlashCommand() error = %v", err)
+	}
+
+	if command.Name != "charset" {
+		t.Fatalf("command.Name = %q, want %q", command.Name, "charset")
+	}
+	if len(command.Args) != 1 || command.Args[0] != "@#S%?*+;:,. " {
+		t.Fatalf("command.Args = %#v", command.Args)
+	}
+}
+
+func TestImageCommandUpdatesStateAndPreview(t *testing.T) {
 	model := NewModel()
+	path := writeImageFixture(t)
 
-	if model.state.Current != StepQuickStart {
-		t.Fatalf("expected initial step %q, got %q", StepQuickStart, model.state.Current)
-	}
-	if model.focused != focusQuickTemplateList {
-		t.Fatalf("expected initial focus %q, got %q", focusQuickTemplateList, model.focused)
-	}
+	model.commandInput.SetValue("/image " + path)
+	model = model.executeCurrentCommand()
 
-	model.focusNext()
-	if model.focused != focusQuickPageSize {
-		t.Fatalf("expected focus to move to %q, got %q", focusQuickPageSize, model.focused)
+	if model.draft.ImagePath != path {
+		t.Fatalf("draft.ImagePath = %q, want %q", model.draft.ImagePath, path)
 	}
-
-	model.moveNextStep()
-	if model.state.Current != StepEdit {
-		t.Fatalf("expected step %q after advancing, got %q", StepEdit, model.state.Current)
+	if model.previewErr != "" {
+		t.Fatalf("previewErr = %q", model.previewErr)
 	}
-	if model.focused != focusEditTitle {
-		t.Fatalf("expected edit step focus %q, got %q", focusEditTitle, model.focused)
-	}
-
-	model.moveNextStep()
-	if model.state.Current != StepStyle {
-		t.Fatalf("expected step %q after advancing, got %q", StepStyle, model.state.Current)
-	}
-
-	model.movePrevStep()
-	if model.state.Current != StepEdit {
-		t.Fatalf("expected step %q after rewinding, got %q", StepEdit, model.state.Current)
+	if model.preview.Width == 0 || model.preview.Height == 0 {
+		t.Fatalf("expected non-empty preview, got %dx%d", model.preview.Width, model.preview.Height)
 	}
 }
 
-func TestSuggestedOutputTracksTemplateAndFormat(t *testing.T) {
+func TestTextFileCommandLoadsLetteringAndDerivesCharset(t *testing.T) {
 	model := NewModel()
+	path := writeTextFixture(t, "glyphs.txt", "Happy Birthday")
 
-	if got := model.composition.Project.Export.Out; got != "exports/modern-card-a6.pdf" {
-		t.Fatalf("expected suggested output %q, got %q", "exports/modern-card-a6.pdf", got)
+	model.commandInput.SetValue("/text-file " + path)
+	model = model.executeCurrentCommand()
+
+	if model.draft.TextFile != path {
+		t.Fatalf("draft.TextFile = %q, want %q", model.draft.TextFile, path)
 	}
-
-	model = model.toggleExportFormat(StepQuickStart)
-	if got := model.composition.Project.Export.Out; got != "exports/modern-card-a6.png" {
-		t.Fatalf("expected suggested output to switch to png, got %q", got)
+	if model.draft.Text != "Happy Birthday" {
+		t.Fatalf("draft.Text = %q", model.draft.Text)
 	}
-
-	model.outputInput.SetValue("custom/output/final.png")
-	model.updateOutputPathFromInput()
-	model = model.selectTemplate(1)
-	if got := model.composition.Project.Export.Out; got != "custom/output/final.png" {
-		t.Fatalf("expected custom output path to survive template change, got %q", got)
+	if got := model.draft.EffectiveASCIIOptions().Charset; got != "Happy Birthday" {
+		t.Fatalf("derived charset = %q, want %q", got, "Happy Birthday")
 	}
 }
 
-func TestBodyImportLoadsTextAndMarkdownIntoBodyOnly(t *testing.T) {
-	for _, tt := range []struct {
-		name     string
-		filename string
-		body     string
-	}{
-		{name: "txt", filename: "message.txt", body: "plain text body"},
-		{name: "md", filename: "message.md", body: "# heading\n\nmarkdown body"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			model := NewModel()
-			model.composition.Project.Content.Title = "Existing Title"
-			model.composition.Project.Content.Signature = "Existing Signature"
-
-			path := writeTempFile(t, tt.filename, tt.body)
-			model.bodyImportInput.SetValue(path)
-
-			model = model.applyBodyImport()
-
-			if got := model.composition.Project.Content.Body; got != tt.body {
-				t.Fatalf("expected imported body %q, got %q", tt.body, got)
-			}
-			if got := model.composition.Project.Content.Title; got != "Existing Title" {
-				t.Fatalf("title changed during import: %q", got)
-			}
-			if got := model.composition.Project.Content.Signature; got != "Existing Signature" {
-				t.Fatalf("signature changed during import: %q", got)
-			}
-			if status := model.status(StepQuickStart); status.IsError {
-				t.Fatalf("expected successful import, got error message %q", status.Text)
-			}
-		})
-	}
-}
-
-func TestPrimaryImageSlotPriority(t *testing.T) {
-	entry := TemplateEntry{
-		ImageSlots: []domain.Slot{
-			{ID: "cover", Type: domain.SlotTypeImage},
-			{ID: "photo", Type: domain.SlotTypeImage},
-			{ID: "detail", Type: domain.SlotTypeImage},
-		},
-	}
-
-	slot, ok := entry.PrimaryImageSlot()
-	if !ok {
-		t.Fatal("expected a primary image slot")
-	}
-	if slot.ID != "photo" {
-		t.Fatalf("expected priority slot %q, got %q", "photo", slot.ID)
-	}
-}
-
-func TestAllowedTypesForTarget(t *testing.T) {
-	textTypes := allowedTypesForTarget(fileTargetBodyImport)
-	if strings.Join(textTypes, ",") != ".txt,.md" {
-		t.Fatalf("unexpected text file types: %v", textTypes)
-	}
-
-	imageTypes := allowedTypesForTarget(fileTargetPrimaryImage)
-	if strings.Join(imageTypes, ",") != ".png,.jpg,.jpeg,.webp" {
-		t.Fatalf("unexpected image file types: %v", imageTypes)
-	}
-}
-
-func TestInvalidBodyImportPreservesExistingState(t *testing.T) {
+func TestInvalidDensityCommandPreservesExistingState(t *testing.T) {
 	model := NewModel()
-	model.composition.Project.Content.Title = "Safe Title"
-	model.composition.Project.Content.Body = "Existing body"
-	model.composition.Project.Content.Signature = "Safe Signature"
-	model.bodyInput.SetValue("Existing body")
-	model.bodyImportInput.SetValue(filepath.Join(t.TempDir(), "missing.txt"))
+	model.draft.ASCII.Density = 96
 
-	model = model.applyBodyImport()
+	model.commandInput.SetValue("/density nope")
+	model = model.executeCurrentCommand()
 
-	if !model.status(StepQuickStart).IsError {
-		t.Fatal("expected invalid import to surface an inline error")
+	if model.draft.ASCII.Density != 96 {
+		t.Fatalf("density changed on invalid command: %d", model.draft.ASCII.Density)
 	}
-	if got := model.composition.Project.Content.Title; got != "Safe Title" {
-		t.Fatalf("title changed after failed import: %q", got)
-	}
-	if got := model.composition.Project.Content.Body; got != "Existing body" {
-		t.Fatalf("body changed after failed import: %q", got)
-	}
-	if got := model.composition.Project.Content.Signature; got != "Safe Signature" {
-		t.Fatalf("signature changed after failed import: %q", got)
+	if !model.status.IsError {
+		t.Fatal("expected invalid density to produce an error status")
 	}
 }
 
-func TestReviewScreenPreservesEarlierSelections(t *testing.T) {
+func TestHistoryRecallMovesThroughCommands(t *testing.T) {
 	model := NewModel()
-	model.state.Current = StepReview
-	model.setFocused(focusReviewExport)
-	model.composition.Project.Content.Title = "Hello"
-	model.composition.Project.Content.Body = "Review body"
-	model.composition.Project.Content.Signature = "From Letterpress"
-	model.composition.Project.Export.Format = domain.ExportFormatPNG
-	model.composition.Project.Export.Out = "output/card.png"
-	model.outputInput.SetValue("output/card.png")
-	model.composition.SetDecorationEnabled("corner-ornament", true)
+	model.pushHistory("/size A5")
+	model.pushHistory("/density 64")
 
-	view := model.View()
+	model.historyPrev()
+	if got := model.commandInput.Value(); got != "/density 64" {
+		t.Fatalf("first historyPrev() = %q, want %q", got, "/density 64")
+	}
 
-	for _, fragment := range []string{
-		"Hello",
-		"Review body",
-		"From Letterpress",
-		"output/card.png",
-		"PNG",
-		"1 selected",
-	} {
-		if !strings.Contains(view, fragment) {
-			t.Fatalf("expected review view to contain %q, got %q", fragment, view)
+	model.historyPrev()
+	if got := model.commandInput.Value(); got != "/size A5" {
+		t.Fatalf("second historyPrev() = %q, want %q", got, "/size A5")
+	}
+
+	model.historyNext()
+	if got := model.commandInput.Value(); got != "/density 64" {
+		t.Fatalf("historyNext() = %q, want %q", got, "/density 64")
+	}
+}
+
+func TestExportCommandDelegatesToASCIIExporter(t *testing.T) {
+	model := NewModel()
+	model.draft.ImagePath = "/tmp/test.png"
+	model.draft.Text = "HELLO"
+
+	origExporter := composeAndWriteASCII
+	defer func() { composeAndWriteASCII = origExporter }()
+
+	var (
+		gotPage   domain.ProjectPage
+		gotImage  string
+		gotASCII  domain.ASCIIOptions
+		gotExport exportpkg.ASCIIExportOptions
+	)
+	composeAndWriteASCII = func(page domain.ProjectPage, imagePath string, asciiOptions domain.ASCIIOptions, exportOptions exportpkg.ASCIIExportOptions) (string, error) {
+		gotPage = page
+		gotImage = imagePath
+		gotASCII = asciiOptions
+		gotExport = exportOptions
+		return exportOptions.Out, nil
+	}
+
+	model.commandInput.SetValue("/export txt ./exports/out.txt")
+	model = model.executeCurrentCommand()
+
+	if gotImage != "/tmp/test.png" {
+		t.Fatalf("image path = %q, want %q", gotImage, "/tmp/test.png")
+	}
+	if gotASCII.Charset != "HELLO" {
+		t.Fatalf("ascii charset = %q, want %q", gotASCII.Charset, "HELLO")
+	}
+	if gotExport.Format != exportpkg.ASCIIFormatTXT {
+		t.Fatalf("export format = %q, want %q", gotExport.Format, exportpkg.ASCIIFormatTXT)
+	}
+	if gotExport.Out != "./exports/out.txt" {
+		t.Fatalf("export out = %q, want %q", gotExport.Out, "./exports/out.txt")
+	}
+	if gotPage.Size != domain.PageSizeA4 || gotPage.Orientation != domain.OrientationPortrait {
+		t.Fatalf("unexpected export page: %+v", gotPage)
+	}
+	if model.status.IsError {
+		t.Fatalf("expected export success, got %q", model.status.Text)
+	}
+}
+
+func TestRefreshPreviewUsesComposeASCII(t *testing.T) {
+	model := NewModel()
+	model.draft.ImagePath = "/tmp/image.png"
+
+	origCompose := composeASCII
+	defer func() { composeASCII = origCompose }()
+
+	composeASCII = func(page domain.ProjectPage, imagePath string, options domain.ASCIIOptions) (*renderpkg.ASCIIComposition, error) {
+		return &renderpkg.ASCIIComposition{
+			Page: renderpkg.Page{
+				Size:        page.Size,
+				Orientation: page.Orientation,
+			},
+			ImagePath: imagePath,
+			Options:   options,
+			Art: asciipkg.Art{
+				Width:  3,
+				Height: 1,
+				Lines:  []string{"ABC"},
+			},
+		}, nil
+	}
+
+	model.refreshPreview()
+	if model.preview.String() != "ABC" {
+		t.Fatalf("preview = %q, want %q", model.preview.String(), "ABC")
+	}
+}
+
+func writeImageFixture(t *testing.T) string {
+	t.Helper()
+
+	img := image.NewNRGBA(image.Rect(0, 0, 4, 4))
+	for y := 0; y < 4; y++ {
+		for x := 0; x < 4; x++ {
+			if x < 2 {
+				img.Set(x, y, color.NRGBA{A: 255})
+				continue
+			}
+			img.Set(x, y, color.NRGBA{R: 255, G: 255, B: 255, A: 255})
 		}
 	}
+
+	path := filepath.Join(t.TempDir(), "fixture.png")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	defer file.Close()
+
+	if err := png.Encode(file, img); err != nil {
+		t.Fatalf("png.Encode() error = %v", err)
+	}
+
+	return path
 }
 
-func TestExportCompositionCallsExistingActors(t *testing.T) {
-	model := NewModel()
-	model.state.Current = StepReview
-	model.outputInput.SetValue("output/review")
-	model.composition.Project.Export.Out = "output/review"
-	model.composition.Project.Export.Format = domain.ExportFormatPDF
-	model.composition.Project.Options.Decorations = true
-
-	origResolve := resolveTemplate
-	origSave := saveProject
-	origCompose := composeAndWrite
-	defer func() {
-		resolveTemplate = origResolve
-		saveProject = origSave
-		composeAndWrite = origCompose
-	}()
-
-	resolveTemplate = func(t domain.Template, project domain.Project) (templatepkg.ResolvedTemplate, error) {
-		return templatepkg.ResolvedTemplate{TemplateID: t.ID}, nil
-	}
-
-	savedProjectPath := ""
-	saveProject = func(path string, project domain.Project) error {
-		savedProjectPath = path
-		return nil
-	}
-
-	var composed export.Options
-	composeAndWrite = func(res templatepkg.ResolvedTemplate, opts export.Options) (string, error) {
-		composed = opts
-		return opts.Out + ".pdf", nil
-	}
-
-	model = model.exportComposition()
-
-	if savedProjectPath == "" {
-		t.Fatal("expected export flow to save the project")
-	}
-	if composed.Out != "output/review" {
-		t.Fatalf("expected export out %q, got %q", "output/review", composed.Out)
-	}
-	if !composed.Decorations {
-		t.Fatal("expected decorations flag to propagate")
-	}
-	if status := model.status(StepReview); status.IsError {
-		t.Fatalf("expected export success, got message %q", status.Text)
-	}
-	if !strings.Contains(model.status(StepReview).Text, "Export saved to") {
-		t.Fatalf("unexpected review message %q", model.status(StepReview).Text)
-	}
-}
-
-func writeTempFile(t *testing.T, name, body string) string {
+func writeTextFixture(t *testing.T, name, body string) string {
 	t.Helper()
 
 	path := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatalf("write temp file: %v", err)
+		t.Fatalf("WriteFile() error = %v", err)
 	}
 	return path
 }
