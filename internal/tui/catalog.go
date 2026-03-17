@@ -18,6 +18,8 @@ type TemplateEntry struct {
 	SupportedSizes     []domain.PageSize
 	DefaultOrientation domain.Orientation
 	Source             string
+	ImageSlots         []domain.Slot
+	DecorationAssets   []domain.Asset
 }
 
 func loadTemplateEntries() []TemplateEntry {
@@ -69,12 +71,28 @@ func loadTemplateEntries() []TemplateEntry {
 
 		category := deriveCategory(normalized)
 
+		imageSlots := make([]domain.Slot, 0, len(tmpl.Slots))
+		for _, slot := range tmpl.Slots {
+			if slot.Type == domain.SlotTypeImage {
+				imageSlots = append(imageSlots, slot)
+			}
+		}
+
+		decorationAssets := make([]domain.Asset, 0, len(tmpl.Assets))
+		for _, asset := range tmpl.Assets {
+			if asset.Kind == domain.AssetKindDecoration {
+				decorationAssets = append(decorationAssets, asset)
+			}
+		}
+
 		entry := TemplateEntry{
 			ID:                 tmpl.ID,
 			Category:           category,
 			SupportedSizes:     tmpl.Page.SupportedSizes,
 			DefaultOrientation: tmpl.Page.DefaultOrientation,
 			Source:             path,
+			ImageSlots:         imageSlots,
+			DecorationAssets:   decorationAssets,
 		}
 
 		if entry.DefaultOrientation == "" {

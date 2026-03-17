@@ -12,16 +12,20 @@ import (
 type Step string
 
 const (
-	StepTemplate Step = "Template Selection"
-	StepSize     Step = "Paper Size & Orientation"
-	StepContent  Step = "Content Composition"
-	StepReview   Step = "Review & Export"
+	StepTemplate    Step = "Template Selection"
+	StepSize        Step = "Paper Size & Orientation"
+	StepContent     Step = "Content Composition"
+	StepImages      Step = "Image Assignment"
+	StepDecorations Step = "Decoration Selection"
+	StepReview      Step = "Review & Export"
 )
 
 var stepOrder = []Step{
 	StepTemplate,
 	StepSize,
 	StepContent,
+	StepImages,
+	StepDecorations,
 	StepReview,
 }
 
@@ -62,6 +66,16 @@ func newState() State {
 				Title:       "Content Composition",
 				Description: "Compose title, body, signature, and decorative slots.",
 				Placeholder: "Type text, use Tab to switch fields.",
+			},
+			StepImages: {
+				Title:       "Image Assignment",
+				Description: "Bind local photos to the template's image slots.",
+				Placeholder: "Use j/k to switch slots, type path, and = to assign.",
+			},
+			StepDecorations: {
+				Title:       "Decoration Selection",
+				Description: "Enable or disable decorative assets.",
+				Placeholder: "Use n/p to pick assets and t to toggle each.",
 			},
 			StepReview: {
 				Title:       "Review & Export",
@@ -115,14 +129,17 @@ func DefaultKeyMap() KeyMap {
 }
 
 type Model struct {
-	state         State
-	composition   CompositionState
-	keyMap        KeyMap
-	width         int
-	height        int
-	templates     []TemplateEntry
-	templateIndex int
-	contentField  ContentField
+	state           State
+	composition     CompositionState
+	keyMap          KeyMap
+	width           int
+	height          int
+	templates       []TemplateEntry
+	templateIndex   int
+	contentField    ContentField
+	imageSlotIndex  int
+	imageInput      string
+	decorationIndex int
 }
 
 func NewModel() Model {
@@ -174,9 +191,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.state = m.state.withPrev()
 		return m, nil
 	case "backspace":
-		if m.state.Current == StepContent {
+		switch m.state.Current {
+		case StepContent:
 			m = m.deleteContentRune()
-		} else {
+		case StepImages:
+			m.imageInput = trimLastRune(m.imageInput)
+		default:
 			m.state = m.state.withPrev()
 		}
 		return m, nil
@@ -189,6 +209,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m = m.handleSizeKey(msg)
 	case StepContent:
 		m = m.handleContentKey(msg)
+	case StepImages:
+		m = m.handleImageKey(msg)
+	case StepDecorations:
+		m = m.handleDecorationKey(msg)
 	}
 
 	return m, nil
@@ -223,6 +247,37 @@ func (m Model) handleContentKey(msg tea.KeyMsg) Model {
 	case tea.KeyRunes:
 		return m.appendContentRunes(msg.Runes)
 	}
+	return m
+}
+
+func (m Model) handleImageKey(msg tea.KeyMsg) Model {
+	switch strings.ToLower(msg.String()) {
+	case "j":
+		return m.cycleImageSlot(1)
+	case "k":
+		return m.cycleImageSlot(-1)
+	case "=":
+		return m.assignCurrentImage()
+	}
+
+	switch msg.Type {
+	case tea.KeyRunes:
+		m.imageInput += string(msg.Runes)
+	}
+
+	return m
+}
+
+func (m Model) handleDecorationKey(msg tea.KeyMsg) Model {
+	switch strings.ToLower(msg.String()) {
+	case "n":
+		return m.cycleDecoration(1)
+	case "p":
+		return m.cycleDecoration(-1)
+	case "t":
+		return m.toggleCurrentDecoration()
+	}
+
 	return m
 }
 
@@ -286,6 +341,10 @@ func (m Model) renderStepContent() string {
 		return m.renderSizeSelector()
 	case StepContent:
 		return m.renderContentEditor()
+	case StepImages:
+		return m.renderImageAssignment()
+	case StepDecorations:
+		return m.renderDecorationSelection()
 	default:
 		return ""
 	}
@@ -365,6 +424,191 @@ func (m Model) renderContentEditor() string {
 	return builder.String()
 }
 
+func (m Model) renderImageAssignment() string {
+	slots := m.currentTemplateImageSlots()
+	if len(slots) == 0 {
+		return "No image slots defined for the selected template."
+	}
+
+	var builder strings.Builder
+	builder.WriteString("Image slots:")
+	for idx, slot := range slots {
+		prefix := "   "
+		if idx == m.imageSlotIndex {
+			prefix = "→ "
+		}
+		path := m.imagePathForSlot(slot.ID)
+		if path == "" {
+			path = "(unassigned)"
+		}
+		builder.WriteString("\n")
+		builder.WriteString(fmt.Sprintf("%s%s: %s", prefix, slot.ID, path))
+	}
+
+	builder.WriteString("\n\nInput path: ")
+	if m.imageInput == "" {
+		builder.WriteString("(empty)")
+	} else {
+		builder.WriteString(m.imageInput)
+	}
+
+	builder.WriteString("\n\nType path, use j/k to select slot, = to assign.")
+	return builder.String()
+}
+
+func (m Model) renderDecorationSelection() string {
+	assets := m.currentTemplateDecorationAssets()
+	if len(assets) == 0 {
+		return "No decoration assets defined for this template."
+	}
+
+	var builder strings.Builder
+	builder.WriteString("Decoration assets:")
+	for idx, asset := range assets {
+		prefix := "   "
+		if idx == m.decorationIndex {
+			prefix = "→ "
+		}
+		status := "off"
+		if m.composition.DecorationSelections[asset.ID] {
+			status = "on"
+		}
+		builder.WriteString("\n")
+		builder.WriteString(fmt.Sprintf("%s%s [%s]", prefix, asset.ID, status))
+	}
+
+	builder.WriteString("\n\nUse n/p to cycle, t to toggle on/off.")
+	return builder.String()
+}
+
+func (m Model) currentImageSlot() (domain.Slot, bool) {
+	slots := m.currentTemplateImageSlots()
+	if len(slots) == 0 {
+		return domain.Slot{}, false
+	}
+
+	idx := m.imageSlotIndex
+	if idx < 0 || idx >= len(slots) {
+		idx = 0
+	}
+
+	return slots[idx], true
+}
+
+func (m Model) cycleImageSlot(delta int) Model {
+	slots := m.currentTemplateImageSlots()
+	if len(slots) == 0 {
+		return m
+	}
+
+	next := m.imageSlotIndex + delta
+	for next < 0 {
+		next += len(slots)
+	}
+	m.imageSlotIndex = next % len(slots)
+	m.imageInput = ""
+	return m
+}
+
+func (m Model) assignCurrentImage() Model {
+	slot, ok := m.currentImageSlot()
+	if !ok {
+		return m
+	}
+
+	path := strings.TrimSpace(m.imageInput)
+	if path == "" {
+		return m
+	}
+
+	m = m.setImageForSlot(slot.ID, path)
+	m.imageInput = ""
+	return m
+}
+
+func (m Model) setImageForSlot(slotID, path string) Model {
+	for idx, binding := range m.composition.Project.Images {
+		if binding.Slot == slotID {
+			m.composition.Project.Images[idx].Path = path
+			return m
+		}
+	}
+
+	m.composition.Project.Images = append(m.composition.Project.Images, domain.ImageBinding{
+		Slot: slotID,
+		Path: path,
+	})
+
+	return m
+}
+
+func (m Model) imagePathForSlot(slotID string) string {
+	for _, binding := range m.composition.Project.Images {
+		if binding.Slot == slotID {
+			return binding.Path
+		}
+	}
+
+	return ""
+}
+
+func (m Model) currentDecorationAsset() (domain.Asset, bool) {
+	assets := m.currentTemplateDecorationAssets()
+	if len(assets) == 0 {
+		return domain.Asset{}, false
+	}
+
+	idx := m.decorationIndex
+	if idx < 0 || idx >= len(assets) {
+		idx = 0
+	}
+
+	return assets[idx], true
+}
+
+func (m Model) cycleDecoration(delta int) Model {
+	assets := m.currentTemplateDecorationAssets()
+	if len(assets) == 0 {
+		return m
+	}
+
+	next := m.decorationIndex + delta
+	for next < 0 {
+		next += len(assets)
+	}
+	m.decorationIndex = next % len(assets)
+	return m
+}
+
+func (m Model) toggleCurrentDecoration() Model {
+	asset, ok := m.currentDecorationAsset()
+	if !ok {
+		return m
+	}
+
+	if m.composition.DecorationSelections == nil {
+		m.composition.DecorationSelections = map[string]bool{}
+	}
+
+	current := m.composition.DecorationSelections[asset.ID]
+	if current {
+		delete(m.composition.DecorationSelections, asset.ID)
+	} else {
+		m.composition.DecorationSelections[asset.ID] = true
+	}
+
+	return m
+}
+
+func trimLastRune(value string) string {
+	if value == "" {
+		return value
+	}
+
+	_, size := utf8.DecodeLastRuneInString(value)
+	return value[:len(value)-size]
+}
+
 func (m Model) formatSizes(sizes []domain.PageSize) string {
 	if len(sizes) == 0 {
 		return "none"
@@ -409,8 +653,31 @@ func (m Model) selectTemplate(idx int) Model {
 		m.composition.Project.Page.Size = entry.SupportedSizes[0]
 	}
 	m.composition.Project.Page.Orientation = entry.DefaultOrientation
+	m.imageSlotIndex = 0
+	m.imageInput = ""
+	m.decorationIndex = 0
+	m.composition.Project.Images = nil
+	m.composition.DecorationSelections = map[string]bool{}
 
 	return m
+}
+
+func (m Model) currentTemplateImageSlots() []domain.Slot {
+	entry, ok := m.currentTemplateEntry()
+	if !ok {
+		return nil
+	}
+
+	return entry.ImageSlots
+}
+
+func (m Model) currentTemplateDecorationAssets() []domain.Asset {
+	entry, ok := m.currentTemplateEntry()
+	if !ok {
+		return nil
+	}
+
+	return entry.DecorationAssets
 }
 
 func (m Model) cycleTemplate(delta int) Model {
