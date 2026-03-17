@@ -37,6 +37,7 @@ func NewRootCmd(deps Dependencies) *cobra.Command {
 	cmd.AddCommand(newTUICmd(deps))
 	cmd.AddCommand(cli.NewTemplatesCmd())
 	cmd.AddCommand(cli.NewValidateCmd())
+	cmd.AddCommand(cli.NewRenderCmd())
 	return cmd
 }
 
