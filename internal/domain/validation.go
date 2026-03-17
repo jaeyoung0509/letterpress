@@ -56,6 +56,21 @@ func (p Project) Validate() error {
 	if !p.Page.Orientation.valid() {
 		errs = errs.add("page.orientation", "must be portrait or landscape")
 	}
+	if p.Options.RenderMode != "" && !p.Options.RenderMode.valid() {
+		errs = errs.add("options.render_mode", "must be compose or ascii")
+	}
+	if p.Options.ASCII.Density < 0 {
+		errs = errs.add("options.ascii.density", "must be greater than or equal to 0")
+	}
+	if p.Options.ASCII.Threshold < 0 || p.Options.ASCII.Threshold > 1 {
+		errs = errs.add("options.ascii.threshold", "must be between 0 and 1")
+	}
+	if p.Options.ASCII.Contrast < 0 {
+		errs = errs.add("options.ascii.contrast", "must be greater than or equal to 0")
+	}
+	if p.Options.ASCII.EdgeWeight < 0 || p.Options.ASCII.EdgeWeight > 1 {
+		errs = errs.add("options.ascii.edge_weight", "must be between 0 and 1")
+	}
 	if p.Export.Format != "" && !p.Export.Format.valid() {
 		errs = errs.add("export.format", "must be one of pdf, png, or svg")
 	}
@@ -194,6 +209,15 @@ func (o Orientation) valid() bool {
 func (f ExportFormat) valid() bool {
 	switch f {
 	case ExportFormatPDF, ExportFormatPNG, ExportFormatSVG:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m RenderMode) valid() bool {
+	switch m {
+	case RenderModeCompose, RenderModeASCII:
 		return true
 	default:
 		return false

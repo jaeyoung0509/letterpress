@@ -28,6 +28,13 @@ const (
 	ExportFormatSVG ExportFormat = "svg"
 )
 
+type RenderMode string
+
+const (
+	RenderModeCompose RenderMode = "compose"
+	RenderModeASCII   RenderMode = "ascii"
+)
+
 type SlotType string
 
 const (
@@ -94,12 +101,23 @@ type ImageBinding struct {
 }
 
 type ProjectOptions struct {
-	Decorations bool `yaml:"decorations,omitempty"`
+	Decorations bool         `yaml:"decorations,omitempty"`
+	RenderMode  RenderMode   `yaml:"render_mode,omitempty"`
+	ASCII       ASCIIOptions `yaml:"ascii,omitempty"`
 }
 
 type ExportOptions struct {
 	Format ExportFormat `yaml:"format,omitempty"`
 	Out    string       `yaml:"out,omitempty"`
+}
+
+type ASCIIOptions struct {
+	Charset    string  `yaml:"charset,omitempty"`
+	Density    int     `yaml:"density,omitempty"`
+	Threshold  float64 `yaml:"threshold,omitempty"`
+	Contrast   float64 `yaml:"contrast,omitempty"`
+	Invert     bool    `yaml:"invert,omitempty"`
+	EdgeWeight float64 `yaml:"edge_weight,omitempty"`
 }
 
 type Template struct {
