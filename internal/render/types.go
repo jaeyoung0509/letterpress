@@ -35,6 +35,7 @@ type Node struct {
 	Style      *domain.Style
 	Text       string
 	ImagePath  string
+	Fit        domain.FitMode
 	Decoration *domain.Asset
 	Required   bool
 }

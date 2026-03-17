@@ -63,6 +63,7 @@ func composeNode(page Page, resolved templatepkg.ResolvedSlot) Node {
 		Style:      cloneStyle(resolved.Style),
 		Text:       resolved.Text,
 		ImagePath:  resolved.ImagePath,
+		Fit:        resolved.Slot.Fit,
 		Decoration: cloneAsset(resolved.Decoration),
 		Required:   resolved.Slot.Required,
 	}
