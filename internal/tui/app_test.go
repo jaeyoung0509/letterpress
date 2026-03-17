@@ -1,183 +1,213 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/jaeyoung0509/letterpress/internal/domain"
 	"github.com/jaeyoung0509/letterpress/internal/export"
 	templatepkg "github.com/jaeyoung0509/letterpress/internal/template"
 )
 
-func TestViewShowsShellLayout(t *testing.T) {
+func TestViewShowsQuickStartScaffold(t *testing.T) {
 	view := NewModel().View()
 
 	for _, fragment := range []string{
 		"letterpress",
-		"Bubble Tea composition shell",
-		"Steps:",
-		"Template Selection",
+		"Quick Start",
+		"Edit Content",
+		"Style & Decorations",
 		"Review & Export",
-		"Available templates:",
-		"Use j/k to cycle templates",
-		"[Forward:",
-		"[Back:",
-		"[Quit:",
-		"Composition in progress",
+		"Template",
+		"Text file (.txt / .md)",
+		"Output",
 	} {
-		if !strings.Contains(view, fragment) {
+		if !strings.Contains(strings.ToLower(view), strings.ToLower(fragment)) {
 			t.Fatalf("expected view to contain %q, got %q", fragment, view)
 		}
 	}
 }
 
-func TestStateAdvancesAndRewinds(t *testing.T) {
+func TestFocusMovementAndStepProgression(t *testing.T) {
 	model := NewModel()
-	initialView := model.View()
-	initialSummary := model.composition.Summary()
 
-	model.state = model.state.withNext()
-	if model.state.Current != StepSize {
-		t.Fatalf("expected step %q after forward, got %q", StepSize, model.state.Current)
+	if model.state.Current != StepQuickStart {
+		t.Fatalf("expected initial step %q, got %q", StepQuickStart, model.state.Current)
+	}
+	if model.focused != focusQuickTemplateList {
+		t.Fatalf("expected initial focus %q, got %q", focusQuickTemplateList, model.focused)
 	}
 
-	interstitialView := model.View()
-	if interstitialView == initialView {
-		t.Fatalf("expected view to change after a forward step")
+	model.focusNext()
+	if model.focused != focusQuickPageSize {
+		t.Fatalf("expected focus to move to %q, got %q", focusQuickPageSize, model.focused)
 	}
 
-	model.state = model.state.withPrev()
-	if model.state.Current != StepTemplate {
-		t.Fatalf("expected step %q after back, got %q", StepTemplate, model.state.Current)
+	model.moveNextStep()
+	if model.state.Current != StepEdit {
+		t.Fatalf("expected step %q after advancing, got %q", StepEdit, model.state.Current)
+	}
+	if model.focused != focusEditTitle {
+		t.Fatalf("expected edit step focus %q, got %q", focusEditTitle, model.focused)
 	}
 
-	if model.View() != initialView {
-		t.Fatalf("expected view to return to the initial state after rewinding")
+	model.moveNextStep()
+	if model.state.Current != StepStyle {
+		t.Fatalf("expected step %q after advancing, got %q", StepStyle, model.state.Current)
 	}
 
-	if model.composition.Summary() != initialSummary {
-		t.Fatalf("composition summary changed after navigation: before=%q after=%q", initialSummary, model.composition.Summary())
+	model.movePrevStep()
+	if model.state.Current != StepEdit {
+		t.Fatalf("expected step %q after rewinding, got %q", StepEdit, model.state.Current)
 	}
 }
 
-func TestTemplatePickerCycles(t *testing.T) {
+func TestSuggestedOutputTracksTemplateAndFormat(t *testing.T) {
 	model := NewModel()
-	if len(model.templates) < 2 {
-		t.Skip("at least two templates required for cycling")
+
+	if got := model.composition.Project.Export.Out; got != "exports/modern-card-a6.pdf" {
+		t.Fatalf("expected suggested output %q, got %q", "exports/modern-card-a6.pdf", got)
 	}
 
-	nextIdx := (model.templateIndex + 1) % len(model.templates)
-	expected := model.templates[nextIdx].ID
+	model = model.toggleExportFormat(StepQuickStart)
+	if got := model.composition.Project.Export.Out; got != "exports/modern-card-a6.png" {
+		t.Fatalf("expected suggested output to switch to png, got %q", got)
+	}
 
-	model = model.cycleTemplate(1)
-	if model.composition.Project.Template != expected {
-		t.Fatalf("expected template %q after cycling, got %q", expected, model.composition.Project.Template)
+	model.outputInput.SetValue("custom/output/final.png")
+	model.updateOutputPathFromInput()
+	model = model.selectTemplate(1)
+	if got := model.composition.Project.Export.Out; got != "custom/output/final.png" {
+		t.Fatalf("expected custom output path to survive template change, got %q", got)
 	}
 }
 
-func TestSizeSelectionAndOrientation(t *testing.T) {
-	model := NewModel()
-	model.state.Current = StepSize
+func TestBodyImportLoadsTextAndMarkdownIntoBodyOnly(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		filename string
+		body     string
+	}{
+		{name: "txt", filename: "message.txt", body: "plain text body"},
+		{name: "md", filename: "message.md", body: "# heading\n\nmarkdown body"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			model := NewModel()
+			model.composition.Project.Content.Title = "Existing Title"
+			model.composition.Project.Content.Signature = "Existing Signature"
 
-	entry, ok := model.currentTemplateEntry()
-	if !ok || len(entry.SupportedSizes) < 2 {
-		t.Skip("template needs at least two supported sizes")
-	}
+			path := writeTempFile(t, tt.filename, tt.body)
+			model.bodyImportInput.SetValue(path)
 
-	initial := model.composition.Project.Page.Size
-	model = model.cycleSize(1)
-	if model.composition.Project.Page.Size == initial {
-		t.Fatalf("expected page size to change after cycling")
-	}
+			model = model.applyBodyImport()
 
-	initialOrientation := model.composition.Project.Page.Orientation
-	model = model.toggleOrientation()
-	if model.composition.Project.Page.Orientation == initialOrientation {
-		t.Fatalf("expected orientation to toggle")
-	}
-}
-
-func TestContentEditingFields(t *testing.T) {
-	model := NewModel()
-	model.state.Current = StepContent
-	model.contentField = FieldTitle
-
-	model = model.appendContentRunes([]rune("Hello"))
-	if model.composition.Project.Content.Title != "Hello" {
-		t.Fatalf("expected title to update, got %q", model.composition.Project.Content.Title)
-	}
-
-	model = model.handleContentKey(tea.KeyMsg{Type: tea.KeyTab})
-	if model.contentField != FieldBody {
-		t.Fatalf("expected content field to cycle to Body, got %v", model.contentField)
-	}
-
-	model = model.appendContentRunes([]rune("Message"))
-	if model.composition.Project.Content.Body != "Message" {
-		t.Fatalf("expected body to update, got %q", model.composition.Project.Content.Body)
-	}
-
-	model = model.deleteContentRune()
-	if model.composition.Project.Content.Body != "Messag" {
-		t.Fatalf("expected body to trim last rune, got %q", model.composition.Project.Content.Body)
+			if got := model.composition.Project.Content.Body; got != tt.body {
+				t.Fatalf("expected imported body %q, got %q", tt.body, got)
+			}
+			if got := model.composition.Project.Content.Title; got != "Existing Title" {
+				t.Fatalf("title changed during import: %q", got)
+			}
+			if got := model.composition.Project.Content.Signature; got != "Existing Signature" {
+				t.Fatalf("signature changed during import: %q", got)
+			}
+			if status := model.status(StepQuickStart); status.IsError {
+				t.Fatalf("expected successful import, got error message %q", status.Text)
+			}
+		})
 	}
 }
 
-func TestReviewPathInputApplies(t *testing.T) {
+func TestPrimaryImageSlotPriority(t *testing.T) {
+	entry := TemplateEntry{
+		ImageSlots: []domain.Slot{
+			{ID: "cover", Type: domain.SlotTypeImage},
+			{ID: "photo", Type: domain.SlotTypeImage},
+			{ID: "detail", Type: domain.SlotTypeImage},
+		},
+	}
+
+	slot, ok := entry.PrimaryImageSlot()
+	if !ok {
+		t.Fatal("expected a primary image slot")
+	}
+	if slot.ID != "photo" {
+		t.Fatalf("expected priority slot %q, got %q", "photo", slot.ID)
+	}
+}
+
+func TestAllowedTypesForTarget(t *testing.T) {
+	textTypes := allowedTypesForTarget(fileTargetBodyImport)
+	if strings.Join(textTypes, ",") != ".txt,.md" {
+		t.Fatalf("unexpected text file types: %v", textTypes)
+	}
+
+	imageTypes := allowedTypesForTarget(fileTargetPrimaryImage)
+	if strings.Join(imageTypes, ",") != ".png,.jpg,.jpeg,.webp" {
+		t.Fatalf("unexpected image file types: %v", imageTypes)
+	}
+}
+
+func TestInvalidBodyImportPreservesExistingState(t *testing.T) {
+	model := NewModel()
+	model.composition.Project.Content.Title = "Safe Title"
+	model.composition.Project.Content.Body = "Existing body"
+	model.composition.Project.Content.Signature = "Safe Signature"
+	model.bodyInput.SetValue("Existing body")
+	model.bodyImportInput.SetValue(filepath.Join(t.TempDir(), "missing.txt"))
+
+	model = model.applyBodyImport()
+
+	if !model.status(StepQuickStart).IsError {
+		t.Fatal("expected invalid import to surface an inline error")
+	}
+	if got := model.composition.Project.Content.Title; got != "Safe Title" {
+		t.Fatalf("title changed after failed import: %q", got)
+	}
+	if got := model.composition.Project.Content.Body; got != "Existing body" {
+		t.Fatalf("body changed after failed import: %q", got)
+	}
+	if got := model.composition.Project.Content.Signature; got != "Safe Signature" {
+		t.Fatalf("signature changed after failed import: %q", got)
+	}
+}
+
+func TestReviewScreenPreservesEarlierSelections(t *testing.T) {
 	model := NewModel()
 	model.state.Current = StepReview
-	model.reviewPathInput = "exports/card"
-	model.composition.Project.Export.Out = ""
+	model.setFocused(focusReviewExport)
+	model.composition.Project.Content.Title = "Hello"
+	model.composition.Project.Content.Body = "Review body"
+	model.composition.Project.Content.Signature = "From Letterpress"
+	model.composition.Project.Export.Format = domain.ExportFormatPNG
+	model.composition.Project.Export.Out = "output/card.png"
+	model.outputInput.SetValue("output/card.png")
+	model.composition.SetDecorationEnabled("corner-ornament", true)
 
-	model = model.applyReviewPathInput()
+	view := model.View()
 
-	if model.composition.Project.Export.Out != "exports/card" {
-		t.Fatalf("expected export path to update, got %q", model.composition.Project.Export.Out)
-	}
-	if model.reviewMessage == "" {
-		t.Fatalf("expected review message after applying path")
-	}
-	if model.reviewPathInput != "" {
-		t.Fatalf("expected review path buffer to clear, got %q", model.reviewPathInput)
-	}
-}
-
-func TestReviewToggleFormatCycles(t *testing.T) {
-	model := NewModel()
-	model.state.Current = StepReview
-	model.composition.Project.Export.Format = domain.ExportFormatPDF
-
-	model = model.toggleExportFormat()
-	if model.composition.Project.Export.Format != domain.ExportFormatPNG {
-		t.Fatalf("expected format to toggle to PNG, got %s", model.composition.Project.Export.Format)
-	}
-
-	model = model.toggleExportFormat()
-	if model.composition.Project.Export.Format != domain.ExportFormatPDF {
-		t.Fatalf("expected format to toggle back to PDF, got %s", model.composition.Project.Export.Format)
+	for _, fragment := range []string{
+		"Hello",
+		"Review body",
+		"From Letterpress",
+		"output/card.png",
+		"PNG",
+		"1 selected",
+	} {
+		if !strings.Contains(view, fragment) {
+			t.Fatalf("expected review view to contain %q, got %q", fragment, view)
+		}
 	}
 }
 
-func TestReviewExportRequiresPath(t *testing.T) {
+func TestExportCompositionCallsExistingActors(t *testing.T) {
 	model := NewModel()
 	model.state.Current = StepReview
-	model.composition.Project.Export.Out = ""
-
-	model = model.exportComposition()
-	if !strings.Contains(model.reviewMessage, "set an export path") {
-		t.Fatalf("expected error message about export path, got %q", model.reviewMessage)
-	}
-	if !model.reviewError {
-		t.Fatalf("expected review error to be true")
-	}
-}
-
-func TestReviewExportCallsActors(t *testing.T) {
-	model := NewModel()
-	model.state.Current = StepReview
+	model.outputInput.SetValue("output/review")
 	model.composition.Project.Export.Out = "output/review"
-	model.composition.DecorationSelections = map[string]bool{"ribbon": true}
+	model.composition.Project.Export.Format = domain.ExportFormatPDF
+	model.composition.Project.Options.Decorations = true
 
 	origResolve := resolveTemplate
 	origSave := saveProject
@@ -192,89 +222,43 @@ func TestReviewExportCallsActors(t *testing.T) {
 		return templatepkg.ResolvedTemplate{TemplateID: t.ID}, nil
 	}
 
-	saved := ""
+	savedProjectPath := ""
 	saveProject = func(path string, project domain.Project) error {
-		saved = path
+		savedProjectPath = path
 		return nil
 	}
 
 	var composed export.Options
 	composeAndWrite = func(res templatepkg.ResolvedTemplate, opts export.Options) (string, error) {
 		composed = opts
-		return opts.Out + ".done", nil
+		return opts.Out + ".pdf", nil
 	}
 
 	model = model.exportComposition()
 
-	if saved == "" {
-		t.Fatalf("expected project to be saved")
-	}
-	if !strings.Contains(model.reviewMessage, "export saved to") {
-		t.Fatalf("unexpected review message: %q", model.reviewMessage)
-	}
-	if !composed.Decorations {
-		t.Fatalf("expected decorations flag to propagate")
+	if savedProjectPath == "" {
+		t.Fatal("expected export flow to save the project")
 	}
 	if composed.Out != "output/review" {
-		t.Fatalf("expected export out to be output/review, got %s", composed.Out)
+		t.Fatalf("expected export out %q, got %q", "output/review", composed.Out)
+	}
+	if !composed.Decorations {
+		t.Fatal("expected decorations flag to propagate")
+	}
+	if status := model.status(StepReview); status.IsError {
+		t.Fatalf("expected export success, got message %q", status.Text)
+	}
+	if !strings.Contains(model.status(StepReview).Text, "Export saved to") {
+		t.Fatalf("unexpected review message %q", model.status(StepReview).Text)
 	}
 }
 
-func TestImageAssignmentFlow(t *testing.T) {
-	model := NewModel()
-	found := false
-	for idx, entry := range model.templates {
-		if len(entry.ImageSlots) > 0 {
-			model = model.selectTemplate(idx)
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Skip("no templates with image slots available")
-	}
+func writeTempFile(t *testing.T, name, body string) string {
+	t.Helper()
 
-	model.state.Current = StepImages
-	model.imageInput = "./assets/custom.jpg"
-	_, ok := model.currentImageSlot()
-	if !ok {
-		t.Skip("selected template has no image slots")
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write temp file: %v", err)
 	}
-
-	model = model.assignCurrentImage()
-	slot, _ := model.currentImageSlot()
-	if path := model.imagePathForSlot(slot.ID); path != "./assets/custom.jpg" {
-		t.Fatalf("expected image assigned to %q, got %q", slot.ID, path)
-	}
-}
-
-func TestDecorationToggleFlow(t *testing.T) {
-	model := NewModel()
-	found := false
-	for idx, entry := range model.templates {
-		if len(entry.DecorationAssets) > 0 {
-			model = model.selectTemplate(idx)
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Skip("no templates with decoration assets available")
-	}
-
-	model.state.Current = StepDecorations
-	asset, ok := model.currentDecorationAsset()
-	if !ok {
-		t.Skip("selected template has no decoration assets")
-	}
-
-	model = model.toggleCurrentDecoration()
-	if !model.composition.DecorationSelections[asset.ID] {
-		t.Fatalf("expected decoration %q to be enabled", asset.ID)
-	}
-
-	model = model.toggleCurrentDecoration()
-	if model.composition.DecorationSelections[asset.ID] {
-		t.Fatalf("expected decoration %q to be disabled after toggling twice", asset.ID)
-	}
+	return path
 }
