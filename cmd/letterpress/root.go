@@ -1,6 +1,7 @@
 package letterpress
 
 import (
+	"github.com/jaeyoung0509/letterpress/internal/cli"
 	"github.com/jaeyoung0509/letterpress/internal/tui"
 	"github.com/spf13/cobra"
 )
@@ -34,6 +35,8 @@ func NewRootCmd(deps Dependencies) *cobra.Command {
 	}
 
 	cmd.AddCommand(newTUICmd(deps))
+	cmd.AddCommand(cli.NewTemplatesCmd())
+	cmd.AddCommand(cli.NewValidateCmd())
 	return cmd
 }
 
