@@ -22,8 +22,8 @@ func TestComposeAndWriteASCIIExportsTXT(t *testing.T) {
 		Size:        domain.PageSizeA4,
 		Orientation: domain.OrientationPortrait,
 	}, imagePath, domain.ASCIIOptions{
-		Charset: "@ ",
-		Density: 4,
+		ToneCharset: "@ ",
+		Density:     4,
 	}, ASCIIExportOptions{
 		Format: ASCIIFormatTXT,
 		Out:    filepath.Join(tmpDir, "ascii-output"),
@@ -107,6 +107,38 @@ func TestNormalizeASCIIOutputPathRejectsMismatchedExtension(t *testing.T) {
 	}
 }
 
+func TestWriteASCIIRejectsTXTForVectorMode(t *testing.T) {
+	composition := sampleASCIIComposition(domain.ProjectPage{
+		Size:        domain.PageSizeA4,
+		Orientation: domain.OrientationPortrait,
+	})
+	composition.Options.Mode = domain.ASCIIModeVector
+
+	if _, err := WriteASCII(composition, ASCIIExportOptions{
+		Format: ASCIIFormatTXT,
+		Out:    filepath.Join(t.TempDir(), "vector.txt"),
+	}); err == nil {
+		t.Fatal("expected vector TXT export to fail")
+	}
+}
+
+func TestWriteASCIIExportsVectorPDFBeta(t *testing.T) {
+	composition := sampleASCIIComposition(domain.ProjectPage{
+		Size:        domain.PageSizeA5,
+		Orientation: domain.OrientationPortrait,
+	})
+	composition.Options.Mode = domain.ASCIIModeVector
+
+	out, err := WriteASCII(composition, ASCIIExportOptions{
+		Format: ASCIIFormatPDF,
+		Out:    filepath.Join(t.TempDir(), "vector-beta.pdf"),
+	})
+	if err != nil {
+		t.Fatalf("WriteASCII() error = %v", err)
+	}
+	assertFileExists(t, out)
+}
+
 func sampleASCIIComposition(page domain.ProjectPage) *render.ASCIIComposition {
 	dimensions, _ := domain.ISOPage(page.Size, page.Orientation)
 
@@ -117,17 +149,25 @@ func sampleASCIIComposition(page domain.ProjectPage) *render.ASCIIComposition {
 			Dimensions:  dimensions,
 		},
 		Options: domain.ASCIIOptions{
-			Charset: "@ ",
-			Density: 4,
+			Mode:        domain.ASCIIModeHybrid,
+			ToneCharset: "@ ",
+			FillText:    "HELLO WORLD",
+			Density:     4,
 		},
 		Art: asciipkg.Art{
-			Width:   4,
-			Height:  2,
-			Charset: "@ ",
+			Mode:     domain.ASCIIModeHybrid,
+			Width:    4,
+			Height:   2,
+			Charset:  "@ ",
+			FillText: "HELLO WORLD",
 			Lines: []string{
 				"@@  ",
 				"@@  ",
 			},
+		},
+		Segments: []asciipkg.Segment{
+			{X1: 0.5, Y1: 0.5, X2: 3.5, Y2: 0.5, Weight: 0.9},
+			{X1: 0.5, Y1: 1.5, X2: 3.5, Y2: 1.5, Weight: 0.8},
 		},
 	}
 }

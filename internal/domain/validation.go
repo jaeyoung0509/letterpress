@@ -59,6 +59,9 @@ func (p Project) Validate() error {
 	if p.Options.RenderMode != "" && !p.Options.RenderMode.valid() {
 		errs = errs.add("options.render_mode", "must be compose or ascii")
 	}
+	if p.Options.ASCII.Mode != "" && !p.Options.ASCII.Mode.valid() {
+		errs = errs.add("options.ascii.mode", "must be tone, outline, fill, hybrid, or vector")
+	}
 	if p.Options.ASCII.Density < 0 {
 		errs = errs.add("options.ascii.density", "must be greater than or equal to 0")
 	}
@@ -68,8 +71,27 @@ func (p Project) Validate() error {
 	if p.Options.ASCII.Contrast < 0 {
 		errs = errs.add("options.ascii.contrast", "must be greater than or equal to 0")
 	}
+	if p.Options.ASCII.Gamma < 0 {
+		errs = errs.add("options.ascii.gamma", "must be greater than or equal to 0")
+	}
 	if p.Options.ASCII.EdgeWeight < 0 || p.Options.ASCII.EdgeWeight > 1 {
 		errs = errs.add("options.ascii.edge_weight", "must be between 0 and 1")
+	}
+	if p.Options.ASCII.EdgeThreshold < 0 || p.Options.ASCII.EdgeThreshold > 1 {
+		errs = errs.add("options.ascii.edge_threshold", "must be between 0 and 1")
+	}
+	if p.Options.ASCII.Dither != "" && !p.Options.ASCII.Dither.valid() {
+		errs = errs.add("options.ascii.dither", "must be off or floyd")
+	}
+	if p.Options.ASCII.FillFont != "" && !p.Options.ASCII.FillFont.valid() {
+		errs = errs.add("options.ascii.fill_font", "must be plain, repeat, or block")
+	}
+	if p.Options.ASCII.CellAspect < 0 {
+		errs = errs.add("options.ascii.cell_aspect", "must be greater than or equal to 0")
+	}
+	mode := p.Options.ASCII.EffectiveMode()
+	if (mode == ASCIIModeFill || mode == ASCIIModeHybrid || mode == ASCIIModeVector) && strings.TrimSpace(p.Options.ASCII.FillText) == "" {
+		errs = errs.add("options.ascii.fill_text", "is required for fill, hybrid, and vector modes")
 	}
 	if p.Export.Format != "" && !p.Export.Format.valid() {
 		errs = errs.add("export.format", "must be one of pdf, png, or svg")
@@ -218,6 +240,33 @@ func (f ExportFormat) valid() bool {
 func (m RenderMode) valid() bool {
 	switch m {
 	case RenderModeCompose, RenderModeASCII:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m ASCIIMode) valid() bool {
+	switch m {
+	case ASCIIModeTone, ASCIIModeOutline, ASCIIModeFill, ASCIIModeHybrid, ASCIIModeVector:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m DitherMode) valid() bool {
+	switch m {
+	case DitherModeOff, DitherModeFloyd:
+		return true
+	default:
+		return false
+	}
+}
+
+func (f FillFont) valid() bool {
+	switch f {
+	case FillFontPlain, FillFontRepeat, FillFontBlock:
 		return true
 	default:
 		return false

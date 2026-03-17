@@ -20,8 +20,8 @@ func TestRenderPathMatchesFixtureOutput(t *testing.T) {
 	}
 
 	art, err := RenderPath(path, domain.ASCIIOptions{
-		Charset: "@ ",
-		Density: 4,
+		ToneCharset: "@ ",
+		Density:     4,
 	})
 	if err != nil {
 		t.Fatalf("RenderPath() error = %v", err)
@@ -42,9 +42,9 @@ func TestRenderImageAppliesThresholdAndInvert(t *testing.T) {
 	img.Set(1, 0, color.NRGBA{R: 208, G: 208, B: 208, A: 255})
 
 	art, err := RenderImage(img, domain.ASCIIOptions{
-		Charset:   "@ ",
-		Density:   2,
-		Threshold: 0.5,
+		ToneCharset: "@ ",
+		Density:     2,
+		Threshold:   0.5,
 	})
 	if err != nil {
 		t.Fatalf("RenderImage() error = %v", err)
@@ -54,10 +54,10 @@ func TestRenderImageAppliesThresholdAndInvert(t *testing.T) {
 	}
 
 	inverted, err := RenderImage(img, domain.ASCIIOptions{
-		Charset:   "@ ",
-		Density:   2,
-		Threshold: 0.5,
-		Invert:    true,
+		ToneCharset: "@ ",
+		Density:     2,
+		Threshold:   0.5,
+		Invert:      true,
 	})
 	if err != nil {
 		t.Fatalf("RenderImage() with invert error = %v", err)
@@ -71,18 +71,20 @@ func TestRenderImageUsesEdgeWeightAndKeepsOutputDeterministic(t *testing.T) {
 	img := checkerImage()
 
 	first, err := RenderImage(img, domain.ASCIIOptions{
-		Charset:    "@# ",
-		Density:    6,
-		EdgeWeight: 0.75,
+		Mode:        domain.ASCIIModeOutline,
+		ToneCharset: "@# ",
+		Density:     6,
+		EdgeWeight:  0.75,
 	})
 	if err != nil {
 		t.Fatalf("first RenderImage() error = %v", err)
 	}
 
 	second, err := RenderImage(img, domain.ASCIIOptions{
-		Charset:    "@# ",
-		Density:    6,
-		EdgeWeight: 0.75,
+		Mode:        domain.ASCIIModeOutline,
+		ToneCharset: "@# ",
+		Density:     6,
+		EdgeWeight:  0.75,
 	})
 	if err != nil {
 		t.Fatalf("second RenderImage() error = %v", err)
@@ -93,6 +95,108 @@ func TestRenderImageUsesEdgeWeightAndKeepsOutputDeterministic(t *testing.T) {
 	}
 	if first.Width != 6 || first.Height < 1 {
 		t.Fatalf("unexpected dimensions %dx%d", first.Width, first.Height)
+	}
+}
+
+func TestRenderImageSeparatesFillTextFromToneCharset(t *testing.T) {
+	img := twoToneImage()
+
+	art, err := RenderImage(img, domain.ASCIIOptions{
+		Mode:        domain.ASCIIModeFill,
+		ToneCharset: "@ ",
+		FillText:    "HI",
+		FillFont:    domain.FillFontPlain,
+		Density:     4,
+	})
+	if err != nil {
+		t.Fatalf("RenderImage() error = %v", err)
+	}
+
+	if art.FillText != "HI" {
+		t.Fatalf("art.FillText = %q, want %q", art.FillText, "HI")
+	}
+	if art.FillFont != domain.FillFontPlain {
+		t.Fatalf("art.FillFont = %q, want %q", art.FillFont, domain.FillFontPlain)
+	}
+	if art.Charset != "@ " {
+		t.Fatalf("art.Charset = %q, want %q", art.Charset, "@ ")
+	}
+	if !strings.Contains(art.String(), "H") || !strings.Contains(art.String(), "I") {
+		t.Fatalf("expected fill text glyphs in art, got %q", art.String())
+	}
+}
+
+func TestRenderImageRepeatFillFontRepeatsRowPattern(t *testing.T) {
+	img := twoToneImage()
+
+	art, err := RenderImage(img, domain.ASCIIOptions{
+		Mode:      domain.ASCIIModeFill,
+		FillText:  "HI",
+		FillFont:  domain.FillFontRepeat,
+		Density:   4,
+		Threshold: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("RenderImage() error = %v", err)
+	}
+
+	if got := art.Lines[0]; got != "HI  " {
+		t.Fatalf("art.Lines[0] = %q, want %q", got, "HI  ")
+	}
+	if got := art.Lines[1]; got != "HI  " {
+		t.Fatalf("art.Lines[1] = %q, want %q", got, "HI  ")
+	}
+}
+
+func TestRenderImageBlockFillFontProducesBlockPattern(t *testing.T) {
+	img := twoToneImage()
+
+	art, err := RenderImage(img, domain.ASCIIOptions{
+		Mode:      domain.ASCIIModeFill,
+		FillText:  "A",
+		FillFont:  domain.FillFontBlock,
+		Density:   10,
+		Threshold: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("RenderImage() error = %v", err)
+	}
+
+	if !strings.Contains(art.String(), "AAA") {
+		t.Fatalf("expected block letter pattern in art, got %q", art.String())
+	}
+	if !strings.Contains(art.String(), "A A") {
+		t.Fatalf("expected hollow block pattern in art, got %q", art.String())
+	}
+}
+
+func TestRenderImageRequiresFillTextForVectorMode(t *testing.T) {
+	_, err := RenderImage(twoToneImage(), domain.ASCIIOptions{
+		Mode:    domain.ASCIIModeVector,
+		Density: 4,
+	})
+	if err == nil {
+		t.Fatal("expected missing fill text error")
+	}
+}
+
+func TestExtractContourSegmentsReturnsRankedSegments(t *testing.T) {
+	art, err := RenderImage(checkerImage(), domain.ASCIIOptions{
+		Mode:        domain.ASCIIModeOutline,
+		ToneCharset: "@# ",
+		Density:     8,
+		EdgeWeight:  1.0,
+	})
+	if err != nil {
+		t.Fatalf("RenderImage() error = %v", err)
+	}
+
+	segments := ExtractContourSegments(art, 0.2)
+	if len(segments) == 0 {
+		t.Fatal("expected contour segments")
+	}
+	if segments[0].Weight <= 0 {
+		t.Fatalf("segment weight = %f", segments[0].Weight)
 	}
 }
 

@@ -35,6 +35,31 @@ const (
 	RenderModeASCII   RenderMode = "ascii"
 )
 
+type ASCIIMode string
+
+const (
+	ASCIIModeTone    ASCIIMode = "tone"
+	ASCIIModeOutline ASCIIMode = "outline"
+	ASCIIModeFill    ASCIIMode = "fill"
+	ASCIIModeHybrid  ASCIIMode = "hybrid"
+	ASCIIModeVector  ASCIIMode = "vector"
+)
+
+type DitherMode string
+
+const (
+	DitherModeOff   DitherMode = "off"
+	DitherModeFloyd DitherMode = "floyd"
+)
+
+type FillFont string
+
+const (
+	FillFontPlain  FillFont = "plain"
+	FillFontRepeat FillFont = "repeat"
+	FillFontBlock  FillFont = "block"
+)
+
 type SlotType string
 
 const (
@@ -112,12 +137,41 @@ type ExportOptions struct {
 }
 
 type ASCIIOptions struct {
-	Charset    string  `yaml:"charset,omitempty"`
-	Density    int     `yaml:"density,omitempty"`
-	Threshold  float64 `yaml:"threshold,omitempty"`
-	Contrast   float64 `yaml:"contrast,omitempty"`
-	Invert     bool    `yaml:"invert,omitempty"`
-	EdgeWeight float64 `yaml:"edge_weight,omitempty"`
+	Mode          ASCIIMode  `yaml:"mode,omitempty"`
+	Charset       string     `yaml:"charset,omitempty"`
+	ToneCharset   string     `yaml:"tone_charset,omitempty"`
+	FillText      string     `yaml:"fill_text,omitempty"`
+	FillFont      FillFont   `yaml:"fill_font,omitempty"`
+	Density       int        `yaml:"density,omitempty"`
+	Threshold     float64    `yaml:"threshold,omitempty"`
+	Contrast      float64    `yaml:"contrast,omitempty"`
+	Gamma         float64    `yaml:"gamma,omitempty"`
+	Invert        bool       `yaml:"invert,omitempty"`
+	EdgeWeight    float64    `yaml:"edge_weight,omitempty"`
+	EdgeThreshold float64    `yaml:"edge_threshold,omitempty"`
+	Dither        DitherMode `yaml:"dither,omitempty"`
+	CellAspect    float64    `yaml:"cell_aspect,omitempty"`
+}
+
+func (o ASCIIOptions) EffectiveMode() ASCIIMode {
+	if o.Mode == "" {
+		return ASCIIModeTone
+	}
+	return o.Mode
+}
+
+func (o ASCIIOptions) EffectiveToneCharset() string {
+	if o.ToneCharset != "" {
+		return o.ToneCharset
+	}
+	return o.Charset
+}
+
+func (o ASCIIOptions) EffectiveFillFont() FillFont {
+	if o.FillFont == "" {
+		return FillFontPlain
+	}
+	return o.FillFont
 }
 
 type Template struct {
