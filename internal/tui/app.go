@@ -2,11 +2,21 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/jaeyoung0509/letterpress/internal/domain"
+	"github.com/jaeyoung0509/letterpress/internal/export"
+	"github.com/jaeyoung0509/letterpress/internal/projectio"
+	templatepkg "github.com/jaeyoung0509/letterpress/internal/template"
+)
+
+var (
+	resolveTemplate = templatepkg.Resolve
+	composeAndWrite = export.ComposeAndWrite
+	saveProject     = projectio.Save
 )
 
 type Step string
@@ -140,6 +150,9 @@ type Model struct {
 	imageSlotIndex  int
 	imageInput      string
 	decorationIndex int
+	reviewPathInput string
+	reviewMessage   string
+	reviewError     bool
 }
 
 func NewModel() Model {
@@ -150,6 +163,9 @@ func NewModel() Model {
 		templates:    loadTemplateEntries(),
 		contentField: FieldTitle,
 	}
+
+	model.reviewPathInput = model.composition.Project.Export.Out
+	model.reviewMessage = ""
 
 	if len(model.templates) > 0 {
 		model = model.selectTemplate(0)
@@ -196,6 +212,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m = m.deleteContentRune()
 		case StepImages:
 			m.imageInput = trimLastRune(m.imageInput)
+		case StepReview:
+			m.reviewPathInput = trimLastRune(m.reviewPathInput)
 		default:
 			m.state = m.state.withPrev()
 		}
@@ -213,6 +231,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m = m.handleImageKey(msg)
 	case StepDecorations:
 		m = m.handleDecorationKey(msg)
+	case StepReview:
+		m = m.handleReviewKey(msg)
 	}
 
 	return m, nil
@@ -276,6 +296,24 @@ func (m Model) handleDecorationKey(msg tea.KeyMsg) Model {
 		return m.cycleDecoration(-1)
 	case "t":
 		return m.toggleCurrentDecoration()
+	}
+
+	return m
+}
+
+func (m Model) handleReviewKey(msg tea.KeyMsg) Model {
+	switch strings.ToLower(msg.String()) {
+	case "f":
+		return m.toggleExportFormat()
+	case "x":
+		return m.exportComposition()
+	case "=":
+		return m.applyReviewPathInput()
+	}
+
+	switch msg.Type {
+	case tea.KeyRunes:
+		m.reviewPathInput += string(msg.Runes)
 	}
 
 	return m
@@ -345,6 +383,8 @@ func (m Model) renderStepContent() string {
 		return m.renderImageAssignment()
 	case StepDecorations:
 		return m.renderDecorationSelection()
+	case StepReview:
+		return m.renderReview()
 	default:
 		return ""
 	}
@@ -479,6 +519,81 @@ func (m Model) renderDecorationSelection() string {
 
 	builder.WriteString("\n\nUse n/p to cycle, t to toggle on/off.")
 	return builder.String()
+}
+
+func (m Model) renderReview() string {
+	var builder strings.Builder
+	builder.WriteString("Review summary:")
+
+	builder.WriteString(fmt.Sprintf("\nTemplate: %s", m.composition.Project.Template))
+	builder.WriteString(fmt.Sprintf("\nPage: %s (%s)", m.composition.Project.Page.Size, m.composition.Project.Page.Orientation))
+
+	builder.WriteString("\n\nContent:")
+	builder.WriteString(fmt.Sprintf("\n   Title: %s", summarizeText(m.composition.Project.Content.Title)))
+	builder.WriteString(fmt.Sprintf("\n   Body: %s", summarizeText(m.composition.Project.Content.Body)))
+	builder.WriteString(fmt.Sprintf("\n   Signature: %s", summarizeText(m.composition.Project.Content.Signature)))
+
+	builder.WriteString("\n\nImages:")
+	slots := m.currentTemplateImageSlots()
+	if len(slots) == 0 {
+		builder.WriteString("\n   none defined")
+	} else {
+		for _, slot := range slots {
+			path := m.imagePathForSlot(slot.ID)
+			if path == "" {
+				path = "(unassigned)"
+			}
+			builder.WriteString(fmt.Sprintf("\n   %s → %s", slot.ID, path))
+		}
+	}
+
+	builder.WriteString("\n\nDecorations:")
+	assets := m.currentTemplateDecorationAssets()
+	if len(assets) == 0 {
+		builder.WriteString("\n   none defined")
+	} else {
+		for _, asset := range assets {
+			state := "off"
+			if m.composition.DecorationSelections[asset.ID] {
+				state = "on"
+			}
+			builder.WriteString(fmt.Sprintf("\n   %s [%s]", asset.ID, state))
+		}
+	}
+
+	builder.WriteString("\n\nExport target:")
+	builder.WriteString(fmt.Sprintf("\n   Format: %s", m.composition.Project.Export.Format))
+	builder.WriteString(fmt.Sprintf("\n   Path: %s", m.composition.Project.Export.Out))
+	builder.WriteString(fmt.Sprintf("\n   Draft input: %s", displayInput(m.reviewPathInput)))
+
+	builder.WriteString("\n\nPress f to toggle format, type path and = to update, x to export.")
+	if m.reviewMessage != "" {
+		prefix := "[ok]"
+		if m.reviewError {
+			prefix = "[error]"
+		}
+		builder.WriteString(fmt.Sprintf("\n%s %s", prefix, m.reviewMessage))
+	}
+
+	return builder.String()
+}
+
+func summarizeText(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "(empty)"
+	}
+	if len(value) <= 60 {
+		return value
+	}
+	return value[:57] + "..."
+}
+
+func displayInput(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "(none)"
+	}
+	return value
 }
 
 func (m Model) currentImageSlot() (domain.Slot, bool) {
@@ -789,4 +904,100 @@ func (m Model) setFieldValue(field ContentField, value string) Model {
 	}
 
 	return m
+}
+
+func (m Model) toggleExportFormat() Model {
+	current := m.composition.Project.Export.Format
+	if current == domain.ExportFormatPNG {
+		current = domain.ExportFormatPDF
+	} else {
+		current = domain.ExportFormatPNG
+	}
+
+	m.composition.Project.Export.Format = current
+	m.reviewMessage = fmt.Sprintf("export format set to %s", current)
+	m.reviewError = false
+	return m
+}
+
+func (m Model) applyReviewPathInput() Model {
+	path := strings.TrimSpace(m.reviewPathInput)
+	if path == "" {
+		m.reviewMessage = "provide a path before confirming"
+		m.reviewError = true
+		return m
+	}
+
+	m.composition.Project.Export.Out = path
+	m.reviewPathInput = ""
+	m.reviewMessage = fmt.Sprintf("export path updated to %s", path)
+	m.reviewError = false
+	return m
+}
+
+func (m Model) exportComposition() Model {
+	path := strings.TrimSpace(m.composition.Project.Export.Out)
+	if path == "" {
+		m.reviewMessage = "set an export path using = before exporting"
+		m.reviewError = true
+		return m
+	}
+
+	entry, ok := m.currentTemplateEntry()
+	if !ok || entry.Template.ID == "" {
+		m.reviewMessage = "select a template before exporting"
+		m.reviewError = true
+		return m
+	}
+
+	projectPath := m.exportProjectPath()
+	if projectPath == "" {
+		m.reviewMessage = "cannot determine project path for saving"
+		m.reviewError = true
+		return m
+	}
+
+	resolved, err := resolveTemplate(entry.Template, m.composition.Project)
+	if err != nil {
+		m.reviewMessage = fmt.Sprintf("template resolve failed: %v", err)
+		m.reviewError = true
+		return m
+	}
+
+	if err := saveProject(projectPath, m.composition.Project); err != nil {
+		m.reviewMessage = fmt.Sprintf("project save failed: %v", err)
+		m.reviewError = true
+		return m
+	}
+
+	options := export.Options{
+		Format:      m.composition.Project.Export.Format,
+		Out:         path,
+		Decorations: len(m.composition.DecorationSelections) > 0,
+	}
+
+	out, err := composeAndWrite(resolved, options)
+	if err != nil {
+		m.reviewMessage = fmt.Sprintf("export failed: %v", err)
+		m.reviewError = true
+		return m
+	}
+
+	m.reviewMessage = fmt.Sprintf("export saved to %s (project at %s)", out, projectPath)
+	m.reviewError = false
+	return m
+}
+
+func (m Model) exportProjectPath() string {
+	output := strings.TrimSpace(m.composition.Project.Export.Out)
+	if output == "" {
+		return ""
+	}
+
+	base := strings.TrimSuffix(output, filepath.Ext(output))
+	if base == "" {
+		base = "letterpress-project"
+	}
+
+	return base + ".project.yaml"
 }
