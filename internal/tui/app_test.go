@@ -120,3 +120,62 @@ func TestContentEditingFields(t *testing.T) {
 		t.Fatalf("expected body to trim last rune, got %q", model.composition.Project.Content.Body)
 	}
 }
+
+func TestImageAssignmentFlow(t *testing.T) {
+	model := NewModel()
+	found := false
+	for idx, entry := range model.templates {
+		if len(entry.ImageSlots) > 0 {
+			model = model.selectTemplate(idx)
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Skip("no templates with image slots available")
+	}
+
+	model.state.Current = StepImages
+	model.imageInput = "./assets/custom.jpg"
+	_, ok := model.currentImageSlot()
+	if !ok {
+		t.Skip("selected template has no image slots")
+	}
+
+	model = model.assignCurrentImage()
+	slot, _ := model.currentImageSlot()
+	if path := model.imagePathForSlot(slot.ID); path != "./assets/custom.jpg" {
+		t.Fatalf("expected image assigned to %q, got %q", slot.ID, path)
+	}
+}
+
+func TestDecorationToggleFlow(t *testing.T) {
+	model := NewModel()
+	found := false
+	for idx, entry := range model.templates {
+		if len(entry.DecorationAssets) > 0 {
+			model = model.selectTemplate(idx)
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Skip("no templates with decoration assets available")
+	}
+
+	model.state.Current = StepDecorations
+	asset, ok := model.currentDecorationAsset()
+	if !ok {
+		t.Skip("selected template has no decoration assets")
+	}
+
+	model = model.toggleCurrentDecoration()
+	if !model.composition.DecorationSelections[asset.ID] {
+		t.Fatalf("expected decoration %q to be enabled", asset.ID)
+	}
+
+	model = model.toggleCurrentDecoration()
+	if model.composition.DecorationSelections[asset.ID] {
+		t.Fatalf("expected decoration %q to be disabled after toggling twice", asset.ID)
+	}
+}

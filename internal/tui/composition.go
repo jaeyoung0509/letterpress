@@ -6,7 +6,8 @@ import (
 )
 
 type CompositionState struct {
-	Project domain.Project
+	Project              domain.Project
+	DecorationSelections map[string]bool
 }
 
 func newCompositionState() CompositionState {
@@ -27,10 +28,18 @@ func newCompositionState() CompositionState {
 				Format: domain.ExportFormatPDF,
 			},
 		},
+		DecorationSelections: map[string]bool{},
 	}
 }
 
 func (c CompositionState) Summary() string {
 	project := c.Project
 	return fmt.Sprintf("template=%s size=%s orientation=%s", project.Template, project.Page.Size, project.Page.Orientation)
+}
+
+func (c CompositionState) DecorationEnabled(id string) bool {
+	if c.DecorationSelections == nil {
+		return false
+	}
+	return c.DecorationSelections[id]
 }
