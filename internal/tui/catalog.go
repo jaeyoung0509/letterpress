@@ -2,15 +2,23 @@ package tui
 
 import (
 	"io/fs"
-	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/jaeyoung0509/letterpress/internal/domain"
-	"gopkg.in/yaml.v3"
+	"github.com/jaeyoung0509/letterpress/internal/schema"
 )
+
+var primaryImageSlotPriority = []string{
+	"artwork",
+	"photo",
+	"hero",
+	"image",
+	"cover",
+}
 
 type TemplateEntry struct {
 	ID                 string
@@ -29,87 +37,54 @@ func loadTemplateEntries() []TemplateEntry {
 		return nil
 	}
 
-	entries := []TemplateEntry{}
-
-	walk := func(path string, d fs.DirEntry, err error) error {
+	entries := make([]TemplateEntry, 0)
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-
-		relPath, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			return nil
-		}
-		normalized := filepath.ToSlash(relPath)
-
 		if d.IsDir() {
-			if normalized == "." {
+			relPath, relErr := filepath.Rel(root, path)
+			if relErr != nil || relPath == "." {
 				return nil
 			}
+			normalized := filepath.ToSlash(relPath)
 			if strings.HasPrefix(normalized, "assets") || strings.HasPrefix(normalized, "samples") {
 				return fs.SkipDir
 			}
 			return nil
 		}
-
-		if filepath.Ext(d.Name()) != ".yaml" {
+		ext := strings.ToLower(filepath.Ext(d.Name()))
+		if ext != ".yaml" && ext != ".yml" {
 			return nil
 		}
 
-		data, err := os.ReadFile(path)
+		tmpl, err := schema.LoadTemplateFile(path)
 		if err != nil {
 			return nil
 		}
 
-		var tmpl domain.Template
-		if err := yaml.Unmarshal(data, &tmpl); err != nil {
+		relPath, err := filepath.Rel(root, path)
+		if err != nil {
 			return nil
 		}
-
-		if tmpl.ID == "" {
-			return nil
-		}
-
-		category := deriveCategory(normalized)
-
-		imageSlots := make([]domain.Slot, 0, len(tmpl.Slots))
-		for _, slot := range tmpl.Slots {
-			if slot.Type == domain.SlotTypeImage {
-				imageSlots = append(imageSlots, slot)
-			}
-		}
-
-		decorationAssets := make([]domain.Asset, 0, len(tmpl.Assets))
-		for _, asset := range tmpl.Assets {
-			if asset.Kind == domain.AssetKindDecoration {
-				decorationAssets = append(decorationAssets, asset)
-			}
-		}
+		normalized := filepath.ToSlash(relPath)
 
 		entry := TemplateEntry{
 			ID:                 tmpl.ID,
-			Category:           category,
-			SupportedSizes:     tmpl.Page.SupportedSizes,
+			Category:           deriveCategory(normalized),
+			SupportedSizes:     append([]domain.PageSize(nil), tmpl.Page.SupportedSizes...),
 			DefaultOrientation: tmpl.Page.DefaultOrientation,
 			Source:             path,
-			ImageSlots:         imageSlots,
-			DecorationAssets:   decorationAssets,
+			ImageSlots:         collectImageSlots(tmpl),
+			DecorationAssets:   collectDecorationAssets(tmpl),
 			Template:           tmpl,
 		}
-
 		if entry.DefaultOrientation == "" {
 			entry.DefaultOrientation = domain.OrientationPortrait
 		}
-
-		if len(entry.SupportedSizes) == 0 {
-			entry.SupportedSizes = []domain.PageSize{domain.PageSizeA4}
-		}
-
 		entries = append(entries, entry)
 		return nil
-	}
-
-	_ = filepath.WalkDir(root, walk)
+	})
 
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].Category == entries[j].Category {
@@ -119,6 +94,26 @@ func loadTemplateEntries() []TemplateEntry {
 	})
 
 	return entries
+}
+
+func collectImageSlots(tmpl domain.Template) []domain.Slot {
+	slots := make([]domain.Slot, 0)
+	for _, slot := range tmpl.Slots {
+		if slot.Type == domain.SlotTypeImage {
+			slots = append(slots, slot)
+		}
+	}
+	return slots
+}
+
+func collectDecorationAssets(tmpl domain.Template) []domain.Asset {
+	assets := make([]domain.Asset, 0)
+	for _, asset := range tmpl.Assets {
+		if asset.Kind == domain.AssetKindDecoration {
+			assets = append(assets, asset)
+		}
+	}
+	return assets
 }
 
 func deriveCategory(relPath string) string {
@@ -131,14 +126,59 @@ func deriveCategory(relPath string) string {
 		return ""
 	}
 
-	return segments[0]
+	return strings.Title(segments[0])
 }
 
 func (e TemplateEntry) Label() string {
-	if e.Category != "" {
-		return e.ID + " (" + strings.Title(e.Category) + ")"
+	if e.Category == "" {
+		return e.ID
 	}
-	return e.ID
+	return e.ID + " (" + e.Category + ")"
+}
+
+func (e TemplateEntry) Description() string {
+	parts := []string{
+		"sizes: " + formatSizes(e.SupportedSizes),
+	}
+	if len(e.ImageSlots) > 0 {
+		parts = append(parts, "images: "+pluralize(len(e.ImageSlots), "slot", "slots"))
+	}
+	if len(e.DecorationAssets) > 0 {
+		parts = append(parts, "decorations: "+pluralize(len(e.DecorationAssets), "asset", "assets"))
+	}
+	return strings.Join(parts, " • ")
+}
+
+func (e TemplateEntry) PrimaryImageSlot() (domain.Slot, bool) {
+	if len(e.ImageSlots) == 0 {
+		return domain.Slot{}, false
+	}
+
+	for _, wanted := range primaryImageSlotPriority {
+		for _, slot := range e.ImageSlots {
+			if strings.EqualFold(slot.ID, wanted) {
+				return slot, true
+			}
+		}
+	}
+
+	return e.ImageSlots[0], true
+}
+
+func (e TemplateEntry) AdditionalImageSlots() []domain.Slot {
+	primary, ok := e.PrimaryImageSlot()
+	if !ok {
+		return nil
+	}
+
+	extra := make([]domain.Slot, 0, len(e.ImageSlots))
+	for _, slot := range e.ImageSlots {
+		if slot.ID != primary.ID {
+			extra = append(extra, slot)
+		}
+	}
+
+	return extra
 }
 
 func templateDir() string {
@@ -149,4 +189,23 @@ func templateDir() string {
 
 	projectRoot := filepath.Dir(filepath.Dir(filepath.Dir(filename)))
 	return filepath.Join(projectRoot, "templates")
+}
+
+func formatSizes(sizes []domain.PageSize) string {
+	if len(sizes) == 0 {
+		return "none"
+	}
+
+	values := make([]string, len(sizes))
+	for i, size := range sizes {
+		values[i] = string(size)
+	}
+	return strings.Join(values, ", ")
+}
+
+func pluralize(count int, singular, plural string) string {
+	if count == 1 {
+		return "1 " + singular
+	}
+	return strconv.Itoa(count) + " " + plural
 }

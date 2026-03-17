@@ -11,6 +11,7 @@ import (
 
 	"github.com/jaeyoung0509/letterpress/internal/domain"
 	"github.com/tdewolff/canvas"
+	_ "golang.org/x/image/webp"
 )
 
 // RenderImageSlot draws the image bound to the node into its canvas rect using the provided fit mode.

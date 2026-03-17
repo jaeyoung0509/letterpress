@@ -2,11 +2,19 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
-	"unicode/utf8"
 
+	"github.com/charmbracelet/bubbles/filepicker"
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/jaeyoung0509/letterpress/internal/domain"
 	"github.com/jaeyoung0509/letterpress/internal/export"
 	"github.com/jaeyoung0509/letterpress/internal/projectio"
@@ -22,78 +30,25 @@ var (
 type Step string
 
 const (
-	StepTemplate    Step = "Template Selection"
-	StepSize        Step = "Paper Size & Orientation"
-	StepContent     Step = "Content Composition"
-	StepImages      Step = "Image Assignment"
-	StepDecorations Step = "Decoration Selection"
-	StepReview      Step = "Review & Export"
+	StepQuickStart Step = "Quick Start"
+	StepEdit       Step = "Edit Content"
+	StepStyle      Step = "Style & Decorations"
+	StepReview     Step = "Review & Export"
 )
 
 var stepOrder = []Step{
-	StepTemplate,
-	StepSize,
-	StepContent,
-	StepImages,
-	StepDecorations,
+	StepQuickStart,
+	StepEdit,
+	StepStyle,
 	StepReview,
-}
-
-type RouteState struct {
-	Title       string
-	Description string
-	Placeholder string
 }
 
 type State struct {
 	Current Step
-	Routes  map[Step]RouteState
 }
 
-type ContentField int
-
-const (
-	FieldTitle ContentField = iota
-	FieldBody
-	FieldSignature
-)
-
 func newState() State {
-	return State{
-		Current: StepTemplate,
-		Routes: map[Step]RouteState{
-			StepTemplate: {
-				Title:       "Template Selection",
-				Description: "Placeholder route for curated templates and layouts.",
-				Placeholder: "Use j/k to pick templates and Enter to continue.",
-			},
-			StepSize: {
-				Title:       "Paper Size & Orientation",
-				Description: "Frame the composition for A3–A6 in portrait or landscape.",
-				Placeholder: "Use s to cycle sizes and o to toggle orientation.",
-			},
-			StepContent: {
-				Title:       "Content Composition",
-				Description: "Compose title, body, signature, and decorative slots.",
-				Placeholder: "Type text, use Tab to switch fields.",
-			},
-			StepImages: {
-				Title:       "Image Assignment",
-				Description: "Bind local photos to the template's image slots.",
-				Placeholder: "Use j/k to switch slots, type path, and = to assign.",
-			},
-			StepDecorations: {
-				Title:       "Decoration Selection",
-				Description: "Enable or disable decorative assets.",
-				Placeholder: "Use n/p to pick assets and t to toggle each.",
-			},
-			StepReview: {
-				Title:       "Review & Export",
-				Description: "Finalize layout, toggle decorations, and export.",
-				Placeholder: "Future work: show export targets (PDF/PNG) and notes.",
-			},
-		},
-	}
+	return State{Current: StepQuickStart}
 }
 
 func (s State) currentIndex() int {
@@ -102,7 +57,6 @@ func (s State) currentIndex() int {
 			return i
 		}
 	}
-
 	return 0
 }
 
@@ -111,7 +65,6 @@ func (s State) withNext() State {
 	if idx+1 < len(stepOrder) {
 		s.Current = stepOrder[idx+1]
 	}
-
 	return s
 }
 
@@ -120,57 +73,149 @@ func (s State) withPrev() State {
 	if idx > 0 {
 		s.Current = stepOrder[idx-1]
 	}
-
 	return s
 }
 
 type KeyMap struct {
-	Forward string
-	Back    string
-	Quit    string
+	Up        key.Binding
+	Down      key.Binding
+	NextFocus key.Binding
+	PrevFocus key.Binding
+	Select    key.Binding
+	Back      key.Binding
+	Quit      key.Binding
 }
 
 func DefaultKeyMap() KeyMap {
 	return KeyMap{
-		Forward: "enter / right / down",
-		Back:    "backspace / left / up",
-		Quit:    "q / ctrl+c",
+		Up:        key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "move")),
+		Down:      key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "move")),
+		NextFocus: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next field")),
+		PrevFocus: key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "prev field")),
+		Select:    key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select")),
+		Back:      key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		Quit:      key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	}
 }
 
+func (k KeyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Up, k.Down, k.NextFocus, k.Select, k.Back, k.Quit}
+}
+
+func (k KeyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{
+		{k.Up, k.Down, k.NextFocus, k.PrevFocus},
+		{k.Select, k.Back, k.Quit},
+	}
+}
+
+type fileTargetKind string
+
+const (
+	fileTargetNone         fileTargetKind = ""
+	fileTargetBodyImport   fileTargetKind = "body-import"
+	fileTargetPrimaryImage fileTargetKind = "primary-image"
+	fileTargetSlotImage    fileTargetKind = "slot-image"
+)
+
+const (
+	focusQuickTemplateList  = "quick-template-list"
+	focusQuickPageSize      = "quick-page-size"
+	focusQuickOrientation   = "quick-orientation"
+	focusQuickBodyImport    = "quick-body-import"
+	focusQuickBodyBrowse    = "quick-body-browse"
+	focusQuickPrimaryImage  = "quick-primary-image"
+	focusQuickPrimaryBrowse = "quick-primary-browse"
+	focusQuickExportFormat  = "quick-export-format"
+	focusQuickOutputPath    = "quick-output-path"
+
+	focusEditTitle     = "edit-title"
+	focusEditBody      = "edit-body"
+	focusEditSignature = "edit-signature"
+
+	focusStyleDecorToggle = "style-decor-toggle"
+	focusStyleDecorList   = "style-decor-list"
+
+	focusReviewExport = "review-export"
+	focusNavBack      = "nav-back"
+	focusNavNext      = "nav-next"
+)
+
+type templateItem struct {
+	entry TemplateEntry
+}
+
+func (i templateItem) Title() string       { return i.entry.Label() }
+func (i templateItem) Description() string { return i.entry.Description() }
+func (i templateItem) FilterValue() string { return i.entry.ID + " " + i.entry.Category }
+
+type stepStatus struct {
+	Text    string
+	IsError bool
+}
+
 type Model struct {
-	state           State
-	composition     CompositionState
-	keyMap          KeyMap
-	width           int
-	height          int
-	templates       []TemplateEntry
-	templateIndex   int
-	contentField    ContentField
-	imageSlotIndex  int
-	imageInput      string
+	state       State
+	composition CompositionState
+	keyMap      KeyMap
+	help        help.Model
+	width       int
+	height      int
+
+	templates     []TemplateEntry
+	templateList  list.Model
+	templateIndex int
+	focused       string
+
+	titleInput        textinput.Model
+	bodyImportInput   textinput.Model
+	bodyInput         textarea.Model
+	signatureInput    textinput.Model
+	primaryImageInput textinput.Model
+	advancedInputs    map[string]textinput.Model
+	outputInput       textinput.Model
+
 	decorationIndex int
-	reviewPathInput string
-	reviewMessage   string
-	reviewError     bool
+
+	filePicker       filepicker.Model
+	filePickerOpen   bool
+	fileTargetKind   fileTargetKind
+	fileTargetSlotID string
+
+	statuses            map[Step]stepStatus
+	suggestedOutputPath string
+	customOutputPath    bool
 }
 
 func NewModel() Model {
 	model := Model{
-		state:        newState(),
-		composition:  newCompositionState(),
-		keyMap:       DefaultKeyMap(),
-		templates:    loadTemplateEntries(),
-		contentField: FieldTitle,
+		state:          newState(),
+		composition:    newCompositionState(),
+		keyMap:         DefaultKeyMap(),
+		help:           help.New(),
+		templates:      loadTemplateEntries(),
+		advancedInputs: map[string]textinput.Model{},
+		statuses:       map[Step]stepStatus{},
+		width:          120,
+		height:         40,
 	}
 
-	model.reviewPathInput = model.composition.Project.Export.Out
-	model.reviewMessage = ""
+	model.templateList = newTemplateList(model.templates)
+	model.titleInput = newTextInput("Title", "Add a short heading")
+	model.bodyImportInput = newTextInput("Body import", "Paste a .txt or .md file path")
+	model.bodyInput = newBodyTextarea()
+	model.signatureInput = newTextInput("Signature", "Add a closing name")
+	model.primaryImageInput = newTextInput("Primary image", "Paste an image path or browse")
+	model.outputInput = newTextInput("Output", "exports/letterpress.pdf")
 
 	if len(model.templates) > 0 {
 		model = model.selectTemplate(0)
+	} else {
+		model.syncSuggestedOutputPath(true)
 	}
 
+	model.setFocused(model.defaultFocusForStep(model.state.Current))
+	model.resizeComponents()
 	return model
 }
 
@@ -189,601 +234,993 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-	case tea.KeyMsg:
-		return m.handleKey(msg)
-	}
-
-	return m, nil
-}
-
-func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "q", "ctrl+c":
-		return m, tea.Quit
-	case "enter", "right", "down", " ":
-		m.state = m.state.withNext()
-		return m, nil
-	case "esc", "left", "up":
-		m.state = m.state.withPrev()
-		return m, nil
-	case "backspace":
-		switch m.state.Current {
-		case StepContent:
-			m = m.deleteContentRune()
-		case StepImages:
-			m.imageInput = trimLastRune(m.imageInput)
-		case StepReview:
-			m.reviewPathInput = trimLastRune(m.reviewPathInput)
-		default:
-			m.state = m.state.withPrev()
+		m.resizeComponents()
+		if m.filePickerOpen {
+			m.filePicker.SetHeight(m.modalHeight())
 		}
+	}
+
+	if m.filePickerOpen {
+		return m.updateFilePicker(msg)
+	}
+
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		switch {
+		case key.Matches(keyMsg, m.keyMap.Quit):
+			return m, tea.Quit
+		case key.Matches(keyMsg, m.keyMap.PrevFocus):
+			m.focusPrev()
+			return m, nil
+		case key.Matches(keyMsg, m.keyMap.NextFocus):
+			m.focusNext()
+			return m, nil
+		case key.Matches(keyMsg, m.keyMap.Back):
+			m.movePrevStep()
+			return m, nil
+		case key.Matches(keyMsg, m.keyMap.Select):
+			return m.activateFocused()
+		}
+	}
+
+	var cmd tea.Cmd
+	switch m.state.Current {
+	case StepQuickStart:
+		m, cmd = m.updateQuickStartStep(msg)
+	case StepEdit:
+		m, cmd = m.updateEditStep(msg)
+	case StepStyle:
+		m, cmd = m.updateStyleStep(msg)
+	case StepReview:
+		m, cmd = m.updateReviewStep(msg)
+	}
+
+	return m, cmd
+}
+
+func (m Model) updateQuickStartStep(msg tea.Msg) (Model, tea.Cmd) {
+	var cmd tea.Cmd
+
+	switch m.focused {
+	case focusQuickTemplateList:
+		next, listCmd := m.templateList.Update(msg)
+		m.templateList = next
+		m = m.syncSelectedTemplateFromList()
+		cmd = listCmd
+	case focusQuickBodyImport:
+		next, inputCmd := m.bodyImportInput.Update(msg)
+		m.bodyImportInput = next
+		cmd = inputCmd
+	case focusQuickPrimaryImage:
+		next, inputCmd := m.primaryImageInput.Update(msg)
+		m.primaryImageInput = next
+		cmd = inputCmd
+	case focusQuickOutputPath:
+		next, inputCmd := m.outputInput.Update(msg)
+		m.outputInput = next
+		m.updateOutputPathFromInput()
+		cmd = inputCmd
+	}
+
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		switch m.focused {
+		case focusQuickPageSize:
+			if key.Matches(keyMsg, m.keyMap.Up) {
+				m = m.cycleSize(-1)
+			} else if key.Matches(keyMsg, m.keyMap.Down) {
+				m = m.cycleSize(1)
+			}
+		case focusQuickOrientation:
+			if key.Matches(keyMsg, m.keyMap.Up) || key.Matches(keyMsg, m.keyMap.Down) {
+				m = m.toggleOrientation()
+			}
+		case focusQuickExportFormat:
+			if key.Matches(keyMsg, m.keyMap.Up) || key.Matches(keyMsg, m.keyMap.Down) {
+				m = m.toggleExportFormat(StepQuickStart)
+			}
+		}
+	}
+
+	return m, cmd
+}
+
+func (m Model) updateEditStep(msg tea.Msg) (Model, tea.Cmd) {
+	var cmd tea.Cmd
+
+	switch m.focused {
+	case focusEditTitle:
+		next, inputCmd := m.titleInput.Update(msg)
+		m.titleInput = next
+		m.composition.Project.Content.Title = m.titleInput.Value()
+		cmd = inputCmd
+	case focusEditBody:
+		next, inputCmd := m.bodyInput.Update(msg)
+		m.bodyInput = next
+		m.composition.Project.Content.Body = m.bodyInput.Value()
+		cmd = inputCmd
+	case focusEditSignature:
+		next, inputCmd := m.signatureInput.Update(msg)
+		m.signatureInput = next
+		m.composition.Project.Content.Signature = m.signatureInput.Value()
+		cmd = inputCmd
+	}
+
+	return m, cmd
+}
+
+func (m Model) updateStyleStep(msg tea.Msg) (Model, tea.Cmd) {
+	var cmd tea.Cmd
+
+	if slotID, ok := styleSlotIDFromFocus(m.focused); ok {
+		input := m.advancedInputs[slotID]
+		next, inputCmd := input.Update(msg)
+		input = next
+		m.advancedInputs[slotID] = input
+		cmd = inputCmd
+	}
+
+	if keyMsg, ok := msg.(tea.KeyMsg); ok && m.focused == focusStyleDecorList {
+		assets := m.currentTemplateDecorationAssets()
+		if len(assets) > 0 {
+			if key.Matches(keyMsg, m.keyMap.Up) {
+				m.decorationIndex--
+				if m.decorationIndex < 0 {
+					m.decorationIndex = len(assets) - 1
+				}
+			} else if key.Matches(keyMsg, m.keyMap.Down) {
+				m.decorationIndex = (m.decorationIndex + 1) % len(assets)
+			}
+		}
+	}
+
+	return m, cmd
+}
+
+func (m Model) updateReviewStep(msg tea.Msg) (Model, tea.Cmd) {
+	return m, nil
+}
+
+func (m Model) updateFilePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if key.Matches(keyMsg, m.keyMap.Quit) {
+			return m, tea.Quit
+		}
+		if key.Matches(keyMsg, m.keyMap.Back) {
+			m.filePickerOpen = false
+			m.fileTargetKind = fileTargetNone
+			m.fileTargetSlotID = ""
+			return m, nil
+		}
+	}
+
+	next, cmd := m.filePicker.Update(msg)
+	m.filePicker = next
+
+	if ok, path := m.filePicker.DidSelectDisabledFile(msg); ok {
+		m.setStatus(m.state.Current, fmt.Sprintf("file type not supported here: %s", path), true)
+		return m, cmd
+	}
+
+	if ok, path := m.filePicker.DidSelectFile(msg); ok {
+		m.applyFileSelection(path)
+		m.filePickerOpen = false
+		m.fileTargetKind = fileTargetNone
+		m.fileTargetSlotID = ""
 		return m, nil
 	}
 
-	switch m.state.Current {
-	case StepTemplate:
-		m = m.handleTemplateKey(msg)
-	case StepSize:
-		m = m.handleSizeKey(msg)
-	case StepContent:
-		m = m.handleContentKey(msg)
-	case StepImages:
-		m = m.handleImageKey(msg)
-	case StepDecorations:
-		m = m.handleDecorationKey(msg)
-	case StepReview:
-		m = m.handleReviewKey(msg)
+	return m, cmd
+}
+
+func (m Model) activateFocused() (tea.Model, tea.Cmd) {
+	switch m.focused {
+	case focusNavBack:
+		m.movePrevStep()
+	case focusNavNext:
+		m.moveNextStep()
+	case focusQuickTemplateList:
+		m.focusNext()
+	case focusQuickPageSize:
+		m = m.cycleSize(1)
+	case focusQuickOrientation:
+		m = m.toggleOrientation()
+	case focusQuickBodyImport:
+		if strings.TrimSpace(m.bodyImportInput.Value()) == "" {
+			return m.openFilePicker(fileTargetBodyImport, "")
+		}
+		m = m.applyBodyImport()
+	case focusQuickBodyBrowse:
+		return m.openFilePicker(fileTargetBodyImport, "")
+	case focusQuickPrimaryImage:
+		if strings.TrimSpace(m.primaryImageInput.Value()) == "" {
+			return m.openFilePicker(fileTargetPrimaryImage, "")
+		}
+		m = m.applyPrimaryImageValue(m.primaryImageInput.Value(), StepQuickStart)
+	case focusQuickPrimaryBrowse:
+		return m.openFilePicker(fileTargetPrimaryImage, "")
+	case focusQuickExportFormat:
+		m = m.toggleExportFormat(StepQuickStart)
+	case focusQuickOutputPath:
+		if strings.TrimSpace(m.outputInput.Value()) == "" {
+			m.syncSuggestedOutputPath(true)
+			m.setStatus(StepQuickStart, "Recommended output path restored.", false)
+		} else {
+			m.setStatus(StepQuickStart, "Output path updated.", false)
+		}
+	case focusStyleDecorToggle:
+		m = m.toggleDecorationsEnabled()
+	case focusStyleDecorList:
+		m = m.toggleCurrentDecoration()
+	case focusReviewExport:
+		m = m.exportComposition()
+	default:
+		if slotID, ok := styleSlotIDFromFocus(m.focused); ok {
+			input := m.advancedInputs[slotID]
+			if strings.TrimSpace(input.Value()) == "" {
+				return m.openFilePicker(fileTargetSlotImage, slotID)
+			}
+			m = m.applyImageValue(slotID, input.Value(), StepStyle)
+		}
+		if slotID, ok := styleSlotBrowseIDFromFocus(m.focused); ok {
+			return m.openFilePicker(fileTargetSlotImage, slotID)
+		}
 	}
 
 	return m, nil
 }
 
-func (m Model) handleTemplateKey(msg tea.KeyMsg) Model {
-	switch strings.ToLower(msg.String()) {
-	case "j":
-		return m.cycleTemplate(1)
-	case "k":
-		return m.cycleTemplate(-1)
+func (m *Model) moveNextStep() {
+	previous := m.state.Current
+	m.state = m.state.withNext()
+	if m.state.Current != previous {
+		m.setFocused(m.defaultFocusForStep(m.state.Current))
 	}
-
-	return m
 }
 
-func (m Model) handleSizeKey(msg tea.KeyMsg) Model {
-	switch strings.ToLower(msg.String()) {
-	case "s":
-		return m.cycleSize(1)
-	case "o":
-		return m.toggleOrientation()
+func (m *Model) movePrevStep() {
+	previous := m.state.Current
+	m.state = m.state.withPrev()
+	if m.state.Current != previous {
+		m.setFocused(m.defaultFocusForStep(m.state.Current))
 	}
-
-	return m
 }
 
-func (m Model) handleContentKey(msg tea.KeyMsg) Model {
-	switch msg.Type {
-	case tea.KeyTab:
-		return m.cycleContentField()
-	case tea.KeyRunes:
-		return m.appendContentRunes(msg.Runes)
+func (m *Model) focusNext() {
+	focusables := m.focusables()
+	if len(focusables) == 0 {
+		return
 	}
-	return m
+	idx := slices.Index(focusables, m.focused)
+	if idx == -1 {
+		m.setFocused(focusables[0])
+		return
+	}
+	m.setFocused(focusables[(idx+1)%len(focusables)])
 }
 
-func (m Model) handleImageKey(msg tea.KeyMsg) Model {
-	switch strings.ToLower(msg.String()) {
-	case "j":
-		return m.cycleImageSlot(1)
-	case "k":
-		return m.cycleImageSlot(-1)
-	case "=":
-		return m.assignCurrentImage()
+func (m *Model) focusPrev() {
+	focusables := m.focusables()
+	if len(focusables) == 0 {
+		return
 	}
-
-	switch msg.Type {
-	case tea.KeyRunes:
-		m.imageInput += string(msg.Runes)
+	idx := slices.Index(focusables, m.focused)
+	if idx == -1 {
+		m.setFocused(focusables[0])
+		return
 	}
-
-	return m
+	idx--
+	if idx < 0 {
+		idx = len(focusables) - 1
+	}
+	m.setFocused(focusables[idx])
 }
 
-func (m Model) handleDecorationKey(msg tea.KeyMsg) Model {
-	switch strings.ToLower(msg.String()) {
-	case "n":
-		return m.cycleDecoration(1)
-	case "p":
-		return m.cycleDecoration(-1)
-	case "t":
-		return m.toggleCurrentDecoration()
-	}
-
-	return m
+func (m *Model) setFocused(id string) {
+	m.focused = id
+	m.syncFocus()
 }
 
-func (m Model) handleReviewKey(msg tea.KeyMsg) Model {
-	switch strings.ToLower(msg.String()) {
-	case "f":
-		return m.toggleExportFormat()
-	case "x":
-		return m.exportComposition()
-	case "=":
-		return m.applyReviewPathInput()
+func (m *Model) syncFocus() {
+	m.titleInput.Blur()
+	m.bodyImportInput.Blur()
+	m.bodyInput.Blur()
+	m.signatureInput.Blur()
+	m.primaryImageInput.Blur()
+	m.outputInput.Blur()
+	for slotID, input := range m.advancedInputs {
+		input.Blur()
+		m.advancedInputs[slotID] = input
 	}
 
-	switch msg.Type {
-	case tea.KeyRunes:
-		m.reviewPathInput += string(msg.Runes)
+	switch m.focused {
+	case focusQuickBodyImport:
+		m.bodyImportInput.Focus()
+	case focusQuickPrimaryImage:
+		m.primaryImageInput.Focus()
+	case focusQuickOutputPath:
+		m.outputInput.Focus()
+	case focusEditTitle:
+		m.titleInput.Focus()
+	case focusEditBody:
+		m.bodyInput.Focus()
+	case focusEditSignature:
+		m.signatureInput.Focus()
+	default:
+		if slotID, ok := styleSlotIDFromFocus(m.focused); ok {
+			input := m.advancedInputs[slotID]
+			input.Focus()
+			m.advancedInputs[slotID] = input
+		}
+	}
+}
+
+func (m Model) focusables() []string {
+	switch m.state.Current {
+	case StepQuickStart:
+		return []string{
+			focusQuickTemplateList,
+			focusQuickPageSize,
+			focusQuickOrientation,
+			focusQuickBodyImport,
+			focusQuickBodyBrowse,
+			focusQuickPrimaryImage,
+			focusQuickPrimaryBrowse,
+			focusQuickExportFormat,
+			focusQuickOutputPath,
+			focusNavNext,
+		}
+	case StepEdit:
+		return []string{
+			focusEditTitle,
+			focusEditBody,
+			focusEditSignature,
+			focusNavBack,
+			focusNavNext,
+		}
+	case StepStyle:
+		focuses := []string{focusStyleDecorToggle}
+		if len(m.currentTemplateDecorationAssets()) > 0 {
+			focuses = append(focuses, focusStyleDecorList)
+		}
+		for _, slot := range m.additionalImageSlots() {
+			focuses = append(focuses, styleSlotFocus(slot.ID), styleSlotBrowseFocus(slot.ID))
+		}
+		focuses = append(focuses, focusNavBack, focusNavNext)
+		return focuses
+	case StepReview:
+		return []string{focusReviewExport, focusNavBack}
+	default:
+		return nil
+	}
+}
+
+func (m Model) defaultFocusForStep(step Step) string {
+	switch step {
+	case StepQuickStart:
+		return focusQuickTemplateList
+	case StepEdit:
+		return focusEditTitle
+	case StepStyle:
+		if len(m.currentTemplateDecorationAssets()) > 0 {
+			return focusStyleDecorToggle
+		}
+		if extra := m.additionalImageSlots(); len(extra) > 0 {
+			return styleSlotFocus(extra[0].ID)
+		}
+		return focusNavNext
+	case StepReview:
+		return focusReviewExport
+	default:
+		return focusQuickTemplateList
+	}
+}
+
+func (m *Model) resizeComponents() {
+	mainWidth := m.mainPanelWidth()
+	m.titleInput.Width = max(20, mainWidth/2-8)
+	m.bodyImportInput.Width = max(28, mainWidth/2-16)
+	m.signatureInput.Width = max(20, mainWidth/2-8)
+	m.primaryImageInput.Width = max(28, mainWidth/2-16)
+	m.outputInput.Width = max(24, mainWidth/2-10)
+	m.bodyInput.SetWidth(max(36, mainWidth-10))
+	m.bodyInput.SetHeight(min(12, max(8, m.height-24)))
+
+	for slotID, input := range m.advancedInputs {
+		input.Width = max(28, mainWidth/2-16)
+		m.advancedInputs[slotID] = input
+	}
+}
+
+func newTemplateList(entries []TemplateEntry) list.Model {
+	items := make([]list.Item, 0, len(entries))
+	for _, entry := range entries {
+		items = append(items, templateItem{entry: entry})
 	}
 
-	return m
+	delegate := list.NewDefaultDelegate()
+	model := list.New(items, delegate, 0, 0)
+	model.SetShowTitle(false)
+	model.SetShowFilter(false)
+	model.SetShowHelp(false)
+	model.SetShowPagination(false)
+	model.SetShowStatusBar(false)
+	model.SetFilteringEnabled(false)
+	return model
+}
+
+func newTextInput(prompt, placeholder string) textinput.Model {
+	input := textinput.New()
+	input.Prompt = ""
+	input.Placeholder = placeholder
+	input.CharLimit = 512
+	input.Width = 48
+	input.SetValue("")
+	_ = prompt
+	return input
+}
+
+func newBodyTextarea() textarea.Model {
+	input := textarea.New()
+	input.Prompt = ""
+	input.Placeholder = "Write the body here, or import it during Quick Start."
+	input.ShowLineNumbers = false
+	input.SetHeight(10)
+	input.SetWidth(60)
+	return input
 }
 
 func (m Model) View() string {
-	lines := []string{
-		"letterpress",
-		"Bubble Tea composition shell",
+	m.resizeComponents()
+
+	header := strings.Join([]string{
+		headerStyle.Render("letterpress"),
+		subtitleStyle.Render("Quick Start first, then fine-tune content and style."),
 		"",
 		m.renderSteps(),
+	}, "\n")
+
+	var body string
+	if m.state.Current == StepQuickStart {
+		body = panelStyle.Width(m.fullPanelWidth()).Render(m.renderQuickStartStep())
+	} else {
+		main := panelStyle.Width(m.mainPanelWidth()).Render(m.renderCurrentStep())
+		sidebar := summaryPanelStyle.Width(m.summaryWidth()).Render(m.renderSidebar())
+		body = joinPanels(main, sidebar, m.width)
+	}
+
+	footer := mutedStyle.Render(m.help.View(m.keyMap))
+	view := strings.Join([]string{
+		header,
 		"",
-		m.renderRoute(),
+		body,
 		"",
-		m.renderStepContent(),
+		footer,
+	}, "\n")
+
+	if m.filePickerOpen {
+		modal := modalStyle.Width(min(m.mainPanelWidth(), m.width-8)).Render(m.renderFilePickerModal())
+		view = strings.Join([]string{view, "", modal}, "\n")
+	}
+
+	return appFrameStyle.Width(max(60, m.width)).Render(view)
+}
+
+func (m Model) renderCurrentStep() string {
+	switch m.state.Current {
+	case StepEdit:
+		return m.renderEditStep()
+	case StepStyle:
+		return m.renderStyleStep()
+	case StepReview:
+		return m.renderReviewStep()
+	default:
+		return m.renderQuickStartStep()
+	}
+}
+
+func (m Model) renderSteps() string {
+	chips := make([]string, 0, len(stepOrder))
+	for _, step := range stepOrder {
+		style := stepChipStyle
+		if step == m.state.Current {
+			style = activeStepChipStyle
+		}
+		chips = append(chips, style.Render(string(step)))
+	}
+	return strings.Join(chips, " ")
+}
+
+func (m Model) renderQuickStartStep() string {
+	contentWidth := max(60, m.fullPanelWidth()-8)
+	leftWidth := contentWidth
+	rightWidth := 0
+	stack := m.width < 150
+	if !stack {
+		leftWidth = max(44, int(float64(contentWidth)*0.58))
+		rightWidth = max(30, contentWidth-leftWidth-4)
+	}
+
+	listView := m.templateList
+	listView.SetSize(max(28, leftWidth-6), min(8, max(4, len(m.templates)+2)))
+
+	entry, _ := m.currentTemplateEntry()
+	left := strings.Join([]string{
+		sectionTitleStyle.Render("1. Quick Start"),
+		mutedStyle.Render("Choose the essentials first: template, page, text import, image, and output."),
 		"",
-		m.renderCompositionSummary(),
+		m.renderQuickTemplateBlock(entry, listView),
 		"",
-		fmt.Sprintf("Viewport: %dx%d", m.width, m.height),
+		m.renderQuickBodyImportBlock(),
 		"",
-		m.renderKeyLegend(),
+		m.renderQuickPrimaryImageBlock(entry),
+		renderStatusBlock(m.status(StepQuickStart)),
+	}, "\n")
+
+	right := strings.Join([]string{
+		m.renderQuickPageBlock(entry),
+		"",
+		m.renderQuickOutputBlock(),
+		"",
+		m.renderQuickChecklist(entry),
+		"",
+		m.renderNavigation(false, true),
+	}, "\n")
+
+	if stack {
+		return lipgloss.JoinVertical(lipgloss.Left, left, "", right)
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Width(leftWidth).Render(left), "  ", lipgloss.NewStyle().Width(rightWidth).Render(right))
+}
+
+func (m Model) renderQuickTemplateBlock(entry TemplateEntry, listView list.Model) string {
+	lines := []string{
+		labelStyle.Render("Template"),
+		listView.View(),
+		"",
+		mutedStyle.Render(fmt.Sprintf("Category: %s", entry.Category)),
+		mutedStyle.Render(fmt.Sprintf("Supported sizes: %s", formatSizes(entry.SupportedSizes))),
+	}
+
+	if len(entry.ImageSlots) > 0 {
+		lines = append(lines, mutedStyle.Render(fmt.Sprintf("Image slots: %d", len(entry.ImageSlots))))
+	}
+	if len(entry.DecorationAssets) > 0 {
+		lines = append(lines, mutedStyle.Render(fmt.Sprintf("Decoration assets: %d", len(entry.DecorationAssets))))
+	}
+
+	if m.focused == focusQuickTemplateList {
+		return focusedBlockStyle.Render(strings.Join(lines, "\n"))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) renderQuickPageBlock(entry TemplateEntry) string {
+	lines := []string{
+		labelStyle.Render("Page"),
+		m.renderOptionGroup("Paper size", entry.SupportedSizes, string(m.composition.Project.Page.Size), m.focused == focusQuickPageSize),
+		"",
+		m.renderOrientationGroup(m.focused == focusQuickOrientation),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) renderQuickBodyImportBlock() string {
+	lines := []string{
+		labelStyle.Render("Text file (.txt / .md)"),
+		m.bodyImportInput.View() + " " + m.renderButton("Browse", m.focused == focusQuickBodyBrowse, false),
+		mutedStyle.Render("Press Enter in the field to import the current path into the body."),
+	}
+
+	if m.focused == focusQuickBodyImport || m.focused == focusQuickBodyBrowse {
+		return focusedBlockStyle.Render(strings.Join(lines, "\n"))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) renderQuickPrimaryImageBlock(entry TemplateEntry) string {
+	label := "Primary image"
+	if slot, ok := entry.PrimaryImageSlot(); ok {
+		label = "Primary image (" + slot.ID + ")"
+	}
+
+	lines := []string{
+		labelStyle.Render(label),
+		m.primaryImageInput.View() + " " + m.renderButton("Browse", m.focused == focusQuickPrimaryBrowse, false),
+		mutedStyle.Render("Press Enter in the field to bind the typed path, or browse for a file."),
+	}
+
+	if m.focused == focusQuickPrimaryImage || m.focused == focusQuickPrimaryBrowse {
+		return focusedBlockStyle.Render(strings.Join(lines, "\n"))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) renderQuickOutputBlock() string {
+	lines := []string{
+		labelStyle.Render("Output"),
+		m.renderFormatSelector(m.focused == focusQuickExportFormat),
+		"",
+		m.renderFieldBlock("Output path", m.outputInput.View(), m.focused == focusQuickOutputPath),
+		mutedStyle.Render("Recommended: " + m.suggestedOutputPath),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) renderQuickChecklist(entry TemplateEntry) string {
+	bodyState := "optional, edit later"
+	if path := strings.TrimSpace(m.composition.BodyImportPath); path != "" {
+		bodyState = "imported from " + summarizeText(path)
+	}
+
+	imageState := "optional"
+	if slot, ok := entry.PrimaryImageSlot(); ok {
+		if path := strings.TrimSpace(m.composition.ImagePath(slot.ID)); path != "" {
+			imageState = "set to " + summarizeText(path)
+		}
+	}
+
+	outputState := "missing"
+	if path := strings.TrimSpace(m.composition.Project.Export.Out); path != "" {
+		outputState = "ready"
+	}
+
+	lines := []string{
+		labelStyle.Render("Ready Check"),
+		"Template: selected",
+		fmt.Sprintf("Page: %s %s", m.composition.Project.Page.Size, m.composition.Project.Page.Orientation),
+		"Body: " + bodyState,
+		"Primary image: " + imageState,
+		"Output: " + outputState,
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) renderEditStep() string {
+	header := []string{
+		sectionTitleStyle.Render("2. Edit Content"),
+		mutedStyle.Render("Fine-tune title, body, and signature after the quick setup is done."),
+	}
+
+	top := joinPanels(
+		m.renderFieldBlock("Title", m.titleInput.View(), m.focused == focusEditTitle),
+		m.renderFieldBlock("Signature", m.signatureInput.View(), m.focused == focusEditSignature),
+		m.mainPanelWidth(),
+	)
+
+	parts := []string{
+		strings.Join(header, "\n"),
+		"",
+		top,
+		"",
+		m.renderFieldBlock("Body", m.bodyInput.View(), m.focused == focusEditBody),
+		"",
+		m.renderNavigation(true, true),
+	}
+
+	return strings.Join(parts, "\n")
+}
+
+func (m Model) renderStyleStep() string {
+	header := []string{
+		sectionTitleStyle.Render("3. Style & Decorations"),
+		mutedStyle.Render("Turn decorations on or off and fill extra image slots only if the template needs them."),
+	}
+
+	left := m.renderStyleDecorationsBlock()
+	right := m.renderStyleAdvancedImagesBlock()
+
+	content := joinPanels(left, right, m.mainPanelWidth())
+	if right == "" {
+		content = left
+	}
+
+	parts := []string{
+		strings.Join(header, "\n"),
+		"",
+		content,
+		renderStatusBlock(m.status(StepStyle)),
+		"",
+		m.renderNavigation(true, true),
+	}
+
+	return strings.Join(parts, "\n")
+}
+
+func (m Model) renderStyleDecorationsBlock() string {
+	assets := m.currentTemplateDecorationAssets()
+	lines := []string{
+		labelStyle.Render("Decorations"),
+		m.renderButton(m.decorationsToggleLabel(), m.focused == focusStyleDecorToggle, false),
+	}
+
+	if len(assets) == 0 {
+		lines = append(lines, mutedStyle.Render("No decoration assets in this template."))
+	} else {
+		for idx, asset := range assets {
+			prefix := "  "
+			if idx == m.decorationIndex {
+				prefix = "→ "
+			}
+			state := "[ ]"
+			if m.composition.DecorationEnabled(asset.ID) {
+				state = "[x]"
+			}
+			line := fmt.Sprintf("%s%s %s", prefix, state, asset.ID)
+			if m.focused == focusStyleDecorList && idx == m.decorationIndex {
+				line = focusedBlockStyle.Render(line)
+			}
+			lines = append(lines, line)
+		}
 	}
 
 	return strings.Join(lines, "\n")
 }
 
-func (m Model) renderSteps() string {
-	var steps []string
-	steps = append(steps, "Steps:")
-	for _, step := range stepOrder {
-		prefix := "   "
-		if step == m.state.Current {
-			prefix = "→ "
-		}
-		steps = append(steps, fmt.Sprintf("%s%s", prefix, step))
-	}
-
-	return strings.Join(steps, "\n")
-}
-
-func (m Model) renderRoute() string {
-	route, ok := m.state.Routes[m.state.Current]
-	if !ok {
-		return "Route placeholder unavailable."
-	}
-
-	return fmt.Sprintf("%s\n%s\n\n%s", route.Title, route.Description, route.Placeholder)
-}
-
-func (m Model) renderCompositionSummary() string {
-	return fmt.Sprintf("Composition in progress (%s)", m.composition.Summary())
-}
-
-func (m Model) renderKeyLegend() string {
-	return fmt.Sprintf("[Forward: %s]  [Back: %s]  [Quit: %s]", m.keyMap.Forward, m.keyMap.Back, m.keyMap.Quit)
-}
-
-func (m Model) renderStepContent() string {
-	switch m.state.Current {
-	case StepTemplate:
-		return m.renderTemplatePicker()
-	case StepSize:
-		return m.renderSizeSelector()
-	case StepContent:
-		return m.renderContentEditor()
-	case StepImages:
-		return m.renderImageAssignment()
-	case StepDecorations:
-		return m.renderDecorationSelection()
-	case StepReview:
-		return m.renderReview()
-	default:
+func (m Model) renderStyleAdvancedImagesBlock() string {
+	extra := m.additionalImageSlots()
+	if len(extra) == 0 {
 		return ""
 	}
+
+	lines := []string{
+		labelStyle.Render("Advanced image slots"),
+		mutedStyle.Render("Only fill these if the selected template has more than one image area."),
+	}
+
+	for _, slot := range extra {
+		input := m.advancedInputs[slot.ID]
+		block := strings.Join([]string{
+			labelStyle.Render(slot.ID),
+			input.View() + " " + m.renderButton("Browse", m.focused == styleSlotBrowseFocus(slot.ID), false),
+			mutedStyle.Render("Press Enter in the field to bind the current path."),
+		}, "\n")
+
+		if m.focused == styleSlotFocus(slot.ID) || m.focused == styleSlotBrowseFocus(slot.ID) {
+			block = focusedBlockStyle.Render(block)
+		}
+
+		lines = append(lines, block)
+	}
+
+	return strings.Join(lines, "\n\n")
 }
 
-func (m Model) renderTemplatePicker() string {
-	if len(m.templates) == 0 {
-		return "Template catalog unavailable."
-	}
+func (m Model) renderReviewStep() string {
+	left := strings.Join([]string{
+		sectionTitleStyle.Render("4. Review & Export"),
+		mutedStyle.Render("Check the final configuration, then export from here."),
+		"",
+		labelStyle.Render("Composition"),
+		m.renderReviewSummary(),
+		renderStatusBlock(m.status(StepReview)),
+	}, "\n")
 
-	var builder strings.Builder
-	builder.WriteString("Available templates:")
-	for idx, entry := range m.templates {
-		prefix := "   "
-		if idx == m.templateIndex {
-			prefix = "→ "
-		}
-		builder.WriteString("\n")
-		builder.WriteString(fmt.Sprintf("%s%s", prefix, entry.Label()))
-		builder.WriteString("\n")
-		builder.WriteString(fmt.Sprintf("      sizes: %s", m.formatSizes(entry.SupportedSizes)))
-	}
+	right := strings.Join([]string{
+		labelStyle.Render("Export target"),
+		fmt.Sprintf("Format: %s", strings.ToUpper(string(m.composition.Project.Export.Format))),
+		fmt.Sprintf("Output: %s", summarizeText(m.composition.Project.Export.Out)),
+		fmt.Sprintf("Project file: %s", summarizeText(m.exportProjectPath())),
+		"",
+		m.renderButton("Export now", m.focused == focusReviewExport, true),
+		"",
+		m.renderNavigation(true, false),
+	}, "\n")
 
-	builder.WriteString("\n\nUse j/k to cycle templates, Enter to continue.")
-	return builder.String()
+	return joinPanels(left, right, m.mainPanelWidth())
 }
 
-func (m Model) renderSizeSelector() string {
-	entry, ok := m.currentTemplateEntry()
-	if !ok {
-		return "Select a template to configure page size."
+func (m Model) renderSidebar() string {
+	blocks := []string{m.renderSummary()}
+
+	switch m.state.Current {
+	case StepEdit:
+		blocks = append(blocks, strings.Join([]string{
+			labelStyle.Render("Editing Tip"),
+			"Use Quick Start for file import.",
+			"Use this step for polish only.",
+		}, "\n"))
+	case StepStyle:
+		blocks = append(blocks, strings.Join([]string{
+			labelStyle.Render("Style Tip"),
+			fmt.Sprintf("%d decorations available", len(m.currentTemplateDecorationAssets())),
+			fmt.Sprintf("%d extra image slots", len(m.additionalImageSlots())),
+		}, "\n"))
+	case StepReview:
+		blocks = append(blocks, strings.Join([]string{
+			labelStyle.Render("Final Check"),
+			"Output path is set",
+			"Export format is chosen",
+			"Project YAML is saved on export",
+		}, "\n"))
 	}
 
-	var builder strings.Builder
-	builder.WriteString("Supported sizes:")
-	for _, size := range entry.SupportedSizes {
-		prefix := "   "
-		if size == m.composition.Project.Page.Size {
-			prefix = "→ "
-		}
-		builder.WriteString("\n")
-		builder.WriteString(fmt.Sprintf("%s%s", prefix, size))
-	}
-
-	builder.WriteString("\n\nOrientation: ")
-	builder.WriteString(string(m.composition.Project.Page.Orientation))
-	builder.WriteString("\n\nPress s to cycle sizes, o to toggle orientation.")
-	return builder.String()
+	return strings.Join(blocks, "\n\n")
 }
 
-func (m Model) renderContentEditor() string {
-	fields := []struct {
-		field ContentField
-		label string
-	}{
-		{FieldTitle, "Title"},
-		{FieldBody, "Body"},
-		{FieldSignature, "Signature"},
-	}
+func (m Model) renderSummary() string {
+	entry, _ := m.currentTemplateEntry()
 
-	var builder strings.Builder
-	builder.WriteString("Content fields:")
-	for _, entry := range fields {
-		prefix := "   "
-		if entry.field == m.contentField {
-			prefix = "→ "
-		}
-		value := m.fieldValue(entry.field)
-		if value == "" {
-			value = "(empty)"
-		}
-		builder.WriteString("\n")
-		builder.WriteString(fmt.Sprintf("%s%s: %s", prefix, entry.label, value))
-	}
-
-	builder.WriteString("\n\nType to edit text, Tab to switch fields.")
-	return builder.String()
-}
-
-func (m Model) renderImageAssignment() string {
-	slots := m.currentTemplateImageSlots()
-	if len(slots) == 0 {
-		return "No image slots defined for the selected template."
-	}
-
-	var builder strings.Builder
-	builder.WriteString("Image slots:")
-	for idx, slot := range slots {
-		prefix := "   "
-		if idx == m.imageSlotIndex {
-			prefix = "→ "
-		}
-		path := m.imagePathForSlot(slot.ID)
-		if path == "" {
-			path = "(unassigned)"
-		}
-		builder.WriteString("\n")
-		builder.WriteString(fmt.Sprintf("%s%s: %s", prefix, slot.ID, path))
-	}
-
-	builder.WriteString("\n\nInput path: ")
-	if m.imageInput == "" {
-		builder.WriteString("(empty)")
-	} else {
-		builder.WriteString(m.imageInput)
-	}
-
-	builder.WriteString("\n\nType path, use j/k to select slot, = to assign.")
-	return builder.String()
-}
-
-func (m Model) renderDecorationSelection() string {
-	assets := m.currentTemplateDecorationAssets()
-	if len(assets) == 0 {
-		return "No decoration assets defined for this template."
-	}
-
-	var builder strings.Builder
-	builder.WriteString("Decoration assets:")
-	for idx, asset := range assets {
-		prefix := "   "
-		if idx == m.decorationIndex {
-			prefix = "→ "
-		}
-		status := "off"
-		if m.composition.DecorationSelections[asset.ID] {
-			status = "on"
-		}
-		builder.WriteString("\n")
-		builder.WriteString(fmt.Sprintf("%s%s [%s]", prefix, asset.ID, status))
-	}
-
-	builder.WriteString("\n\nUse n/p to cycle, t to toggle on/off.")
-	return builder.String()
-}
-
-func (m Model) renderReview() string {
-	var builder strings.Builder
-	builder.WriteString("Review summary:")
-
-	builder.WriteString(fmt.Sprintf("\nTemplate: %s", m.composition.Project.Template))
-	builder.WriteString(fmt.Sprintf("\nPage: %s (%s)", m.composition.Project.Page.Size, m.composition.Project.Page.Orientation))
-
-	builder.WriteString("\n\nContent:")
-	builder.WriteString(fmt.Sprintf("\n   Title: %s", summarizeText(m.composition.Project.Content.Title)))
-	builder.WriteString(fmt.Sprintf("\n   Body: %s", summarizeText(m.composition.Project.Content.Body)))
-	builder.WriteString(fmt.Sprintf("\n   Signature: %s", summarizeText(m.composition.Project.Content.Signature)))
-
-	builder.WriteString("\n\nImages:")
-	slots := m.currentTemplateImageSlots()
-	if len(slots) == 0 {
-		builder.WriteString("\n   none defined")
-	} else {
-		for _, slot := range slots {
-			path := m.imagePathForSlot(slot.ID)
-			if path == "" {
-				path = "(unassigned)"
-			}
-			builder.WriteString(fmt.Sprintf("\n   %s → %s", slot.ID, path))
+	primary := "Not set"
+	if slot, ok := entry.PrimaryImageSlot(); ok {
+		if path := strings.TrimSpace(m.composition.ImagePath(slot.ID)); path != "" {
+			primary = summarizeText(path)
 		}
 	}
 
-	builder.WriteString("\n\nDecorations:")
-	assets := m.currentTemplateDecorationAssets()
-	if len(assets) == 0 {
-		builder.WriteString("\n   none defined")
-	} else {
-		for _, asset := range assets {
-			state := "off"
-			if m.composition.DecorationSelections[asset.ID] {
-				state = "on"
-			}
-			builder.WriteString(fmt.Sprintf("\n   %s [%s]", asset.ID, state))
-		}
+	lines := []string{
+		sectionTitleStyle.Render("Summary"),
+		"",
+		labelStyle.Render("Template"),
+		entry.ID,
+		"",
+		labelStyle.Render("Page"),
+		fmt.Sprintf("%s %s", m.composition.Project.Page.Size, m.composition.Project.Page.Orientation),
+		"",
+		labelStyle.Render("Body import"),
+		m.bodyImportSummary(),
+		"",
+		labelStyle.Render("Primary image"),
+		primary,
+		"",
+		labelStyle.Render("Decorations"),
+		fmt.Sprintf("%d selected", m.composition.DecorationCount()),
+		"",
+		labelStyle.Render("Export"),
+		fmt.Sprintf("%s -> %s", strings.ToUpper(string(m.composition.Project.Export.Format)), summarizeText(m.composition.Project.Export.Out)),
 	}
 
-	builder.WriteString("\n\nExport target:")
-	builder.WriteString(fmt.Sprintf("\n   Format: %s", m.composition.Project.Export.Format))
-	builder.WriteString(fmt.Sprintf("\n   Path: %s", m.composition.Project.Export.Out))
-	builder.WriteString(fmt.Sprintf("\n   Draft input: %s", displayInput(m.reviewPathInput)))
-
-	builder.WriteString("\n\nPress f to toggle format, type path and = to update, x to export.")
-	if m.reviewMessage != "" {
-		prefix := "[ok]"
-		if m.reviewError {
-			prefix = "[error]"
-		}
-		builder.WriteString(fmt.Sprintf("\n%s %s", prefix, m.reviewMessage))
-	}
-
-	return builder.String()
+	return strings.Join(lines, "\n")
 }
 
-func summarizeText(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "(empty)"
+func (m Model) renderReviewSummary() string {
+	lines := []string{
+		fmt.Sprintf("Template: %s", m.composition.Project.Template),
+		fmt.Sprintf("Page: %s %s", m.composition.Project.Page.Size, m.composition.Project.Page.Orientation),
+		fmt.Sprintf("Title: %s", summarizeText(m.composition.Project.Content.Title)),
+		fmt.Sprintf("Body: %s", summarizeText(m.composition.Project.Content.Body)),
+		fmt.Sprintf("Signature: %s", summarizeText(m.composition.Project.Content.Signature)),
 	}
-	if len(value) <= 60 {
-		return value
+
+	entry, _ := m.currentTemplateEntry()
+	if slot, ok := entry.PrimaryImageSlot(); ok {
+		lines = append(lines, fmt.Sprintf("Primary image: %s", summarizeText(m.composition.ImagePath(slot.ID))))
 	}
-	return value[:57] + "..."
+	for _, slot := range m.additionalImageSlots() {
+		lines = append(lines, fmt.Sprintf("%s: %s", slot.ID, summarizeText(m.composition.ImagePath(slot.ID))))
+	}
+	lines = append(lines, fmt.Sprintf("Decorations: %d selected", m.composition.DecorationCount()))
+	return strings.Join(lines, "\n")
 }
 
-func displayInput(value string) string {
-	if strings.TrimSpace(value) == "" {
-		return "(none)"
+func (m Model) renderFieldBlock(label, view string, focused bool) string {
+	block := strings.Join([]string{labelStyle.Render(label), view}, "\n")
+	if focused {
+		return focusedBlockStyle.Render(block)
 	}
-	return value
+	return block
 }
 
-func (m Model) currentImageSlot() (domain.Slot, bool) {
-	slots := m.currentTemplateImageSlots()
-	if len(slots) == 0 {
-		return domain.Slot{}, false
+func (m Model) renderOptionGroup(label string, sizes []domain.PageSize, selected string, focused bool) string {
+	values := make([]string, 0, len(sizes))
+	for _, size := range sizes {
+		values = append(values, m.renderChoice(string(size), selected == string(size), focused))
 	}
 
-	idx := m.imageSlotIndex
-	if idx < 0 || idx >= len(slots) {
-		idx = 0
+	block := strings.Join([]string{
+		labelStyle.Render(label),
+		strings.Join(values, " "),
+	}, "\n")
+	if focused {
+		return focusedBlockStyle.Render(block)
 	}
-
-	return slots[idx], true
+	return block
 }
 
-func (m Model) cycleImageSlot(delta int) Model {
-	slots := m.currentTemplateImageSlots()
-	if len(slots) == 0 {
-		return m
+func (m Model) renderOrientationGroup(focused bool) string {
+	block := strings.Join([]string{
+		labelStyle.Render("Orientation"),
+		strings.Join([]string{
+			m.renderChoice("portrait", m.composition.Project.Page.Orientation == domain.OrientationPortrait, focused),
+			m.renderChoice("landscape", m.composition.Project.Page.Orientation == domain.OrientationLandscape, focused),
+		}, " "),
+	}, "\n")
+	if focused {
+		return focusedBlockStyle.Render(block)
 	}
-
-	next := m.imageSlotIndex + delta
-	for next < 0 {
-		next += len(slots)
-	}
-	m.imageSlotIndex = next % len(slots)
-	m.imageInput = ""
-	return m
+	return block
 }
 
-func (m Model) assignCurrentImage() Model {
-	slot, ok := m.currentImageSlot()
-	if !ok {
-		return m
+func (m Model) renderFormatSelector(focused bool) string {
+	block := strings.Join([]string{
+		labelStyle.Render("Format"),
+		strings.Join([]string{
+			m.renderChoice("PDF", m.composition.Project.Export.Format == domain.ExportFormatPDF, focused),
+			m.renderChoice("PNG", m.composition.Project.Export.Format == domain.ExportFormatPNG, focused),
+		}, " "),
+	}, "\n")
+	if focused {
+		return focusedBlockStyle.Render(block)
 	}
-
-	path := strings.TrimSpace(m.imageInput)
-	if path == "" {
-		return m
-	}
-
-	m = m.setImageForSlot(slot.ID, path)
-	m.imageInput = ""
-	return m
+	return block
 }
 
-func (m Model) setImageForSlot(slotID, path string) Model {
-	for idx, binding := range m.composition.Project.Images {
-		if binding.Slot == slotID {
-			m.composition.Project.Images[idx].Path = path
-			return m
-		}
+func (m Model) renderChoice(label string, selected bool, focused bool) string {
+	style := buttonStyle
+	if selected {
+		style = buttonPrimaryStyle
 	}
-
-	m.composition.Project.Images = append(m.composition.Project.Images, domain.ImageBinding{
-		Slot: slotID,
-		Path: path,
-	})
-
-	return m
+	if focused && selected {
+		style = buttonPrimaryFocusedStyle
+	} else if focused {
+		style = buttonFocusedStyle
+	}
+	return style.Render(label)
 }
 
-func (m Model) imagePathForSlot(slotID string) string {
-	for _, binding := range m.composition.Project.Images {
-		if binding.Slot == slotID {
-			return binding.Path
-		}
+func (m Model) renderButton(label string, focused, primary bool) string {
+	style := buttonStyle
+	if primary {
+		style = buttonPrimaryStyle
 	}
-
-	return ""
+	if focused && primary {
+		style = buttonPrimaryFocusedStyle
+	} else if focused {
+		style = buttonFocusedStyle
+	}
+	return style.Render(label)
 }
 
-func (m Model) currentDecorationAsset() (domain.Asset, bool) {
-	assets := m.currentTemplateDecorationAssets()
-	if len(assets) == 0 {
-		return domain.Asset{}, false
+func (m Model) renderNavigation(showBack, showNext bool) string {
+	buttons := make([]string, 0, 2)
+	if showBack {
+		buttons = append(buttons, m.renderButton("Back", m.focused == focusNavBack, false))
 	}
-
-	idx := m.decorationIndex
-	if idx < 0 || idx >= len(assets) {
-		idx = 0
+	if showNext {
+		buttons = append(buttons, m.renderButton("Continue", m.focused == focusNavNext, true))
 	}
-
-	return assets[idx], true
+	return strings.Join(buttons, " ")
 }
 
-func (m Model) cycleDecoration(delta int) Model {
-	assets := m.currentTemplateDecorationAssets()
-	if len(assets) == 0 {
-		return m
+func renderStatusBlock(status stepStatus) string {
+	if status.Text == "" {
+		return ""
 	}
-
-	next := m.decorationIndex + delta
-	for next < 0 {
-		next += len(assets)
+	if status.IsError {
+		return "\n" + errorStyle.Render(status.Text)
 	}
-	m.decorationIndex = next % len(assets)
-	return m
+	return "\n" + successStyle.Render(status.Text)
 }
 
-func (m Model) toggleCurrentDecoration() Model {
-	asset, ok := m.currentDecorationAsset()
-	if !ok {
-		return m
+func (m Model) renderFilePickerModal() string {
+	target := "file"
+	switch m.fileTargetKind {
+	case fileTargetBodyImport:
+		target = "body import (.txt, .md)"
+	case fileTargetPrimaryImage, fileTargetSlotImage:
+		target = "image (.png, .jpg, .jpeg, .webp)"
 	}
 
-	if m.composition.DecorationSelections == nil {
-		m.composition.DecorationSelections = map[string]bool{}
-	}
-
-	current := m.composition.DecorationSelections[asset.ID]
-	if current {
-		delete(m.composition.DecorationSelections, asset.ID)
-	} else {
-		m.composition.DecorationSelections[asset.ID] = true
-	}
-
-	return m
-}
-
-func trimLastRune(value string) string {
-	if value == "" {
-		return value
-	}
-
-	_, size := utf8.DecodeLastRuneInString(value)
-	return value[:len(value)-size]
-}
-
-func (m Model) formatSizes(sizes []domain.PageSize) string {
-	if len(sizes) == 0 {
-		return "none"
-	}
-
-	parts := make([]string, len(sizes))
-	for i, size := range sizes {
-		parts[i] = string(size)
-	}
-
-	return strings.Join(parts, ", ")
+	return strings.Join([]string{
+		sectionTitleStyle.Render("Browse local files"),
+		mutedStyle.Render("Enter selects a file. Backspace moves up a directory. Esc closes the modal."),
+		"",
+		labelStyle.Render("Current directory"),
+		m.filePicker.CurrentDirectory,
+		"",
+		labelStyle.Render("Allowed"),
+		target,
+		"",
+		m.filePicker.View(),
+	}, "\n")
 }
 
 func (m Model) currentTemplateEntry() (TemplateEntry, bool) {
 	if len(m.templates) == 0 {
 		return TemplateEntry{}, false
 	}
-
-	idx := m.templateIndex
-	if idx < 0 || idx >= len(m.templates) {
-		idx = 0
+	if m.templateIndex < 0 || m.templateIndex >= len(m.templates) {
+		return TemplateEntry{}, false
 	}
-
-	return m.templates[idx], true
-}
-
-func (m Model) selectTemplate(idx int) Model {
-	if len(m.templates) == 0 {
-		return m
-	}
-
-	if idx < 0 {
-		idx = 0
-	} else if idx >= len(m.templates) {
-		idx = len(m.templates) - 1
-	}
-
-	entry := m.templates[idx]
-	m.templateIndex = idx
-	m.composition.Project.Template = entry.ID
-	if len(entry.SupportedSizes) > 0 {
-		m.composition.Project.Page.Size = entry.SupportedSizes[0]
-	}
-	m.composition.Project.Page.Orientation = entry.DefaultOrientation
-	m.imageSlotIndex = 0
-	m.imageInput = ""
-	m.decorationIndex = 0
-	m.composition.Project.Images = nil
-	m.composition.DecorationSelections = map[string]bool{}
-
-	return m
-}
-
-func (m Model) currentTemplateImageSlots() []domain.Slot {
-	entry, ok := m.currentTemplateEntry()
-	if !ok {
-		return nil
-	}
-
-	return entry.ImageSlots
+	return m.templates[m.templateIndex], true
 }
 
 func (m Model) currentTemplateDecorationAssets() []domain.Asset {
@@ -791,213 +1228,590 @@ func (m Model) currentTemplateDecorationAssets() []domain.Asset {
 	if !ok {
 		return nil
 	}
-
 	return entry.DecorationAssets
 }
 
-func (m Model) cycleTemplate(delta int) Model {
+func (m Model) additionalImageSlots() []domain.Slot {
+	entry, ok := m.currentTemplateEntry()
+	if !ok {
+		return nil
+	}
+	return entry.AdditionalImageSlots()
+}
+
+func (m Model) syncSelectedTemplateFromList() Model {
 	if len(m.templates) == 0 {
 		return m
 	}
 
-	next := m.templateIndex + delta
-	for next < 0 {
-		next += len(m.templates)
-	}
-	next = next % len(m.templates)
-
-	return m.selectTemplate(next)
-}
-
-func (m Model) cycleSize(delta int) Model {
-	entry, ok := m.currentTemplateEntry()
+	item, ok := m.templateList.SelectedItem().(templateItem)
 	if !ok {
 		return m
 	}
 
-	sizes := entry.SupportedSizes
-	if len(sizes) == 0 {
-		return m
-	}
-
-	current := m.composition.Project.Page.Size
-	idx := 0
-	for i, size := range sizes {
-		if size == current {
-			idx = i
-			break
+	for idx, entry := range m.templates {
+		if entry.ID == item.entry.ID {
+			return m.selectTemplate(idx)
 		}
 	}
 
-	next := idx + delta
-	for next < 0 {
-		next += len(sizes)
-	}
-	next = next % len(sizes)
+	return m
+}
 
-	m.composition.Project.Page.Size = sizes[next]
+func (m Model) selectTemplate(idx int) Model {
+	if idx < 0 || idx >= len(m.templates) {
+		return m
+	}
+
+	entry := m.templates[idx]
+	m.templateIndex = idx
+	m.templateList.Select(idx)
+	m.composition.Project.Template = entry.ID
+
+	if len(entry.SupportedSizes) > 0 && !slices.Contains(entry.SupportedSizes, m.composition.Project.Page.Size) {
+		m.composition.Project.Page.Size = entry.SupportedSizes[0]
+	}
+	if m.composition.Project.Page.Size == "" && len(entry.SupportedSizes) > 0 {
+		m.composition.Project.Page.Size = entry.SupportedSizes[0]
+	}
+	if entry.DefaultOrientation != "" {
+		m.composition.Project.Page.Orientation = entry.DefaultOrientation
+	}
+
+	m.composition.Project.Images = nil
+	m.composition.DisableAllDecorations()
+	m.decorationIndex = 0
+	m.rebuildImageInputs(entry)
+	m.syncSuggestedOutputPath(false)
+	m.clearStatus(StepQuickStart)
+	m.clearStatus(StepStyle)
+	m.clearStatus(StepReview)
+	return m
+}
+
+func (m *Model) rebuildImageInputs(entry TemplateEntry) {
+	m.primaryImageInput.SetValue("")
+	m.advancedInputs = map[string]textinput.Model{}
+
+	if slot, ok := entry.PrimaryImageSlot(); ok {
+		m.primaryImageInput.SetValue(m.composition.ImagePath(slot.ID))
+	}
+
+	for _, slot := range entry.AdditionalImageSlots() {
+		input := newTextInput(slot.ID, "Paste an image path or browse")
+		input.SetValue(m.composition.ImagePath(slot.ID))
+		m.advancedInputs[slot.ID] = input
+	}
+}
+
+func (m Model) cycleSize(delta int) Model {
+	entry, ok := m.currentTemplateEntry()
+	if !ok || len(entry.SupportedSizes) == 0 {
+		return m
+	}
+
+	idx := slices.Index(entry.SupportedSizes, m.composition.Project.Page.Size)
+	if idx == -1 {
+		idx = 0
+	}
+	idx += delta
+	for idx < 0 {
+		idx += len(entry.SupportedSizes)
+	}
+	idx = idx % len(entry.SupportedSizes)
+	m.composition.Project.Page.Size = entry.SupportedSizes[idx]
 	return m
 }
 
 func (m Model) toggleOrientation() Model {
-	current := m.composition.Project.Page.Orientation
-	if current == domain.OrientationLandscape {
+	if m.composition.Project.Page.Orientation == domain.OrientationLandscape {
 		m.composition.Project.Page.Orientation = domain.OrientationPortrait
 	} else {
 		m.composition.Project.Page.Orientation = domain.OrientationLandscape
 	}
-
 	return m
 }
 
-func (m Model) appendContentRunes(runes []rune) Model {
-	if len(runes) == 0 {
-		return m
-	}
-
-	value := m.fieldValue(m.contentField)
-	value += string(runes)
-	return m.setFieldValue(m.contentField, value)
-}
-
-func (m Model) deleteContentRune() Model {
-	value := m.fieldValue(m.contentField)
-	if value == "" {
-		return m
-	}
-
-	_, size := utf8.DecodeLastRuneInString(value)
-	value = value[:len(value)-size]
-	return m.setFieldValue(m.contentField, value)
-}
-
-func (m Model) cycleContentField() Model {
-	m.contentField++
-	if m.contentField > FieldSignature {
-		m.contentField = FieldTitle
-	}
-
-	return m
-}
-
-func (m Model) fieldValue(field ContentField) string {
-	switch field {
-	case FieldTitle:
-		return m.composition.Project.Content.Title
-	case FieldBody:
-		return m.composition.Project.Content.Body
-	case FieldSignature:
-		return m.composition.Project.Content.Signature
-	default:
-		return ""
-	}
-}
-
-func (m Model) setFieldValue(field ContentField, value string) Model {
-	switch field {
-	case FieldTitle:
-		m.composition.Project.Content.Title = value
-	case FieldBody:
-		m.composition.Project.Content.Body = value
-	case FieldSignature:
-		m.composition.Project.Content.Signature = value
-	}
-
-	return m
-}
-
-func (m Model) toggleExportFormat() Model {
-	current := m.composition.Project.Export.Format
-	if current == domain.ExportFormatPNG {
-		current = domain.ExportFormatPDF
+func (m Model) toggleExportFormat(step Step) Model {
+	if m.composition.Project.Export.Format == domain.ExportFormatPNG {
+		m.composition.Project.Export.Format = domain.ExportFormatPDF
 	} else {
-		current = domain.ExportFormatPNG
+		m.composition.Project.Export.Format = domain.ExportFormatPNG
 	}
-
-	m.composition.Project.Export.Format = current
-	m.reviewMessage = fmt.Sprintf("export format set to %s", current)
-	m.reviewError = false
+	m.syncSuggestedOutputPath(false)
+	m.setStatus(step, fmt.Sprintf("Export format set to %s.", strings.ToUpper(string(m.composition.Project.Export.Format))), false)
 	return m
 }
 
-func (m Model) applyReviewPathInput() Model {
-	path := strings.TrimSpace(m.reviewPathInput)
-	if path == "" {
-		m.reviewMessage = "provide a path before confirming"
-		m.reviewError = true
+func (m Model) applyBodyImport() Model {
+	path := strings.TrimSpace(m.bodyImportInput.Value())
+	body, err := importBodyFile(path)
+	if err != nil {
+		m.setStatus(StepQuickStart, err.Error(), true)
 		return m
 	}
 
-	m.composition.Project.Export.Out = path
-	m.reviewPathInput = ""
-	m.reviewMessage = fmt.Sprintf("export path updated to %s", path)
-	m.reviewError = false
+	m.composition.BodyImportPath = path
+	m.composition.Project.Content.Body = body
+	m.bodyInput.SetValue(body)
+	m.setStatus(StepQuickStart, fmt.Sprintf("Imported body text from %s.", path), false)
+	return m
+}
+
+func importBodyFile(path string) (string, error) {
+	if err := validateBodyImportFile(path); err != nil {
+		return "", err
+	}
+
+	data, err := os.ReadFile(filepath.Clean(path))
+	if err != nil {
+		return "", fmt.Errorf("could not read %s: %w", path, err)
+	}
+
+	return string(data), nil
+}
+
+func validateBodyImportFile(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("choose a .txt or .md file for the body")
+	}
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext != ".txt" && ext != ".md" {
+		return fmt.Errorf("body import supports only .txt and .md files")
+	}
+	info, err := os.Stat(filepath.Clean(path))
+	if err != nil {
+		return fmt.Errorf("body import file not found: %s", path)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("body import path must be a file")
+	}
+	return nil
+}
+
+func (m Model) applyPrimaryImageValue(path string, step Step) Model {
+	entry, ok := m.currentTemplateEntry()
+	if !ok {
+		return m
+	}
+	slot, ok := entry.PrimaryImageSlot()
+	if !ok {
+		m.setStatus(step, "This template has no primary image slot.", true)
+		return m
+	}
+	return m.applyImageValue(slot.ID, path, step)
+}
+
+func (m Model) applyImageValue(slotID, path string, step Step) Model {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		m.composition.RemoveImage(slotID)
+		m.setStatus(step, fmt.Sprintf("Cleared image for %s.", slotID), false)
+		return m
+	}
+
+	if err := validateImageFile(path); err != nil {
+		m.setStatus(step, err.Error(), true)
+		return m
+	}
+
+	m.composition.SetImage(slotID, path)
+	m.setStatus(step, fmt.Sprintf("Image bound to %s.", slotID), false)
+	return m
+}
+
+func validateImageFile(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("choose an image file")
+	}
+
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".png", ".jpg", ".jpeg", ".webp":
+	default:
+		return fmt.Errorf("image field supports .png, .jpg, .jpeg, and .webp")
+	}
+
+	info, err := os.Stat(filepath.Clean(path))
+	if err != nil {
+		return fmt.Errorf("image file not found: %s", path)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("image path must be a file")
+	}
+	return nil
+}
+
+func (m Model) toggleDecorationsEnabled() Model {
+	assets := m.currentTemplateDecorationAssets()
+	if m.composition.Project.Options.Decorations {
+		m.composition.DisableAllDecorations()
+		m.setStatus(StepStyle, "Decorations disabled.", false)
+		return m
+	}
+	m.composition.EnableAllDecorations(assets)
+	m.setStatus(StepStyle, "Decorations enabled.", false)
+	return m
+}
+
+func (m Model) toggleCurrentDecoration() Model {
+	assets := m.currentTemplateDecorationAssets()
+	if len(assets) == 0 {
+		return m
+	}
+	if m.decorationIndex < 0 || m.decorationIndex >= len(assets) {
+		m.decorationIndex = 0
+	}
+	asset := assets[m.decorationIndex]
+	enabled := !m.composition.DecorationEnabled(asset.ID)
+	m.composition.SetDecorationEnabled(asset.ID, enabled)
+	if enabled {
+		m.setStatus(StepStyle, fmt.Sprintf("Enabled decoration %s.", asset.ID), false)
+	} else {
+		m.setStatus(StepStyle, fmt.Sprintf("Disabled decoration %s.", asset.ID), false)
+	}
 	return m
 }
 
 func (m Model) exportComposition() Model {
-	path := strings.TrimSpace(m.composition.Project.Export.Out)
+	path := strings.TrimSpace(m.outputInput.Value())
 	if path == "" {
-		m.reviewMessage = "set an export path using = before exporting"
-		m.reviewError = true
+		m.syncSuggestedOutputPath(true)
+		path = strings.TrimSpace(m.outputInput.Value())
+	}
+	if path == "" {
+		m.setStatus(StepReview, "Set an output path before exporting.", true)
 		return m
 	}
 
+	m.composition.Project.Export.Out = path
 	entry, ok := m.currentTemplateEntry()
 	if !ok || entry.Template.ID == "" {
-		m.reviewMessage = "select a template before exporting"
-		m.reviewError = true
+		m.setStatus(StepReview, "Select a template before exporting.", true)
 		return m
 	}
 
 	projectPath := m.exportProjectPath()
-	if projectPath == "" {
-		m.reviewMessage = "cannot determine project path for saving"
-		m.reviewError = true
-		return m
-	}
-
 	resolved, err := resolveTemplate(entry.Template, m.composition.Project)
 	if err != nil {
-		m.reviewMessage = fmt.Sprintf("template resolve failed: %v", err)
-		m.reviewError = true
+		m.setStatus(StepReview, fmt.Sprintf("Template resolve failed: %v", err), true)
 		return m
 	}
 
 	if err := saveProject(projectPath, m.composition.Project); err != nil {
-		m.reviewMessage = fmt.Sprintf("project save failed: %v", err)
-		m.reviewError = true
+		m.setStatus(StepReview, fmt.Sprintf("Project save failed: %v", err), true)
 		return m
 	}
 
-	options := export.Options{
+	out, err := composeAndWrite(resolved, export.Options{
 		Format:      m.composition.Project.Export.Format,
 		Out:         path,
-		Decorations: len(m.composition.DecorationSelections) > 0,
-	}
-
-	out, err := composeAndWrite(resolved, options)
+		Decorations: m.composition.Project.Options.Decorations,
+	})
 	if err != nil {
-		m.reviewMessage = fmt.Sprintf("export failed: %v", err)
-		m.reviewError = true
+		m.setStatus(StepReview, fmt.Sprintf("Export failed: %v", err), true)
 		return m
 	}
 
-	m.reviewMessage = fmt.Sprintf("export saved to %s (project at %s)", out, projectPath)
-	m.reviewError = false
+	m.setStatus(StepReview, fmt.Sprintf("Export saved to %s. Project saved to %s.", out, projectPath), false)
 	return m
 }
 
 func (m Model) exportProjectPath() string {
 	output := strings.TrimSpace(m.composition.Project.Export.Out)
 	if output == "" {
-		return ""
+		output = m.suggestedOutputPath
+	}
+	if output == "" {
+		return "exports/letterpress.project.yaml"
 	}
 
 	base := strings.TrimSuffix(output, filepath.Ext(output))
 	if base == "" {
-		base = "letterpress-project"
+		base = "exports/letterpress"
+	}
+	return base + ".project.yaml"
+}
+
+func (m Model) openFilePicker(target fileTargetKind, slotID string) (tea.Model, tea.Cmd) {
+	picker := filepicker.New()
+	picker.CurrentDirectory = currentDirectoryForValue(m.currentPathValue(target, slotID))
+	picker.AllowedTypes = allowedTypesForTarget(target)
+	picker.ShowPermissions = false
+	picker.ShowSize = false
+	picker.FileAllowed = true
+	picker.DirAllowed = false
+	picker.SetHeight(m.modalHeight())
+	picker.KeyMap.Back = key.NewBinding(key.WithKeys("backspace", "left"), key.WithHelp("backspace", "up"))
+	picker.KeyMap.Down = key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "down"))
+	picker.KeyMap.Up = key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "up"))
+
+	m.filePicker = picker
+	m.filePickerOpen = true
+	m.fileTargetKind = target
+	m.fileTargetSlotID = slotID
+	return m, picker.Init()
+}
+
+func currentDirectoryForValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "."
+		}
+		return wd
 	}
 
-	return base + ".project.yaml"
+	cleaned := filepath.Clean(value)
+	info, err := os.Stat(cleaned)
+	if err == nil {
+		if info.IsDir() {
+			return cleaned
+		}
+		return filepath.Dir(cleaned)
+	}
+
+	dir := filepath.Dir(cleaned)
+	if dir == "." || dir == "" {
+		wd, wdErr := os.Getwd()
+		if wdErr != nil {
+			return "."
+		}
+		return wd
+	}
+
+	if _, err := os.Stat(dir); err == nil {
+		return dir
+	}
+
+	wd, wdErr := os.Getwd()
+	if wdErr != nil {
+		return "."
+	}
+	return wd
+}
+
+func allowedTypesForTarget(target fileTargetKind) []string {
+	switch target {
+	case fileTargetBodyImport:
+		return []string{".txt", ".md"}
+	case fileTargetPrimaryImage, fileTargetSlotImage:
+		return []string{".png", ".jpg", ".jpeg", ".webp"}
+	default:
+		return nil
+	}
+}
+
+func (m Model) currentPathValue(target fileTargetKind, slotID string) string {
+	switch target {
+	case fileTargetBodyImport:
+		return m.bodyImportInput.Value()
+	case fileTargetPrimaryImage:
+		return m.primaryImageInput.Value()
+	case fileTargetSlotImage:
+		if input, ok := m.advancedInputs[slotID]; ok {
+			return input.Value()
+		}
+	}
+	return ""
+}
+
+func (m *Model) applyFileSelection(path string) {
+	cleaned := normalizeSelectedPath(path)
+	switch m.fileTargetKind {
+	case fileTargetBodyImport:
+		m.bodyImportInput.SetValue(cleaned)
+		updated := m.applyBodyImport()
+		*m = updated
+	case fileTargetPrimaryImage:
+		m.primaryImageInput.SetValue(cleaned)
+		updated := m.applyPrimaryImageValue(cleaned, StepQuickStart)
+		*m = updated
+	case fileTargetSlotImage:
+		input := m.advancedInputs[m.fileTargetSlotID]
+		input.SetValue(cleaned)
+		m.advancedInputs[m.fileTargetSlotID] = input
+		updated := m.applyImageValue(m.fileTargetSlotID, cleaned, StepStyle)
+		*m = updated
+	}
+}
+
+func normalizeSelectedPath(path string) string {
+	cleaned := filepath.Clean(path)
+	wd, err := os.Getwd()
+	if err != nil {
+		return cleaned
+	}
+	rel, err := filepath.Rel(wd, cleaned)
+	if err == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return rel
+	}
+	return cleaned
+}
+
+func (m *Model) updateOutputPathFromInput() {
+	value := strings.TrimSpace(m.outputInput.Value())
+	if value == "" {
+		m.composition.Project.Export.Out = ""
+		m.customOutputPath = false
+		return
+	}
+
+	m.composition.Project.Export.Out = value
+	m.customOutputPath = value != m.suggestedOutputPath
+}
+
+func (m Model) suggestedOutput() string {
+	entry, ok := m.currentTemplateEntry()
+	name := "letterpress"
+	if ok && entry.ID != "" {
+		name = entry.ID
+	}
+
+	format := m.composition.Project.Export.Format
+	if format == "" {
+		format = domain.ExportFormatPDF
+	}
+
+	return filepath.Join("exports", name+"."+string(format))
+}
+
+func (m *Model) syncSuggestedOutputPath(force bool) {
+	oldSuggested := m.suggestedOutputPath
+	newSuggested := m.suggestedOutput()
+	current := strings.TrimSpace(m.outputInput.Value())
+	shouldApply := force || !m.customOutputPath || current == "" || current == oldSuggested
+
+	m.suggestedOutputPath = newSuggested
+	if shouldApply {
+		m.outputInput.SetValue(newSuggested)
+		m.composition.Project.Export.Out = newSuggested
+		m.customOutputPath = false
+	}
+}
+
+func (m *Model) setStatus(step Step, text string, isError bool) {
+	if m.statuses == nil {
+		m.statuses = map[Step]stepStatus{}
+	}
+	m.statuses[step] = stepStatus{Text: text, IsError: isError}
+}
+
+func (m *Model) clearStatus(step Step) {
+	delete(m.statuses, step)
+}
+
+func (m Model) status(step Step) stepStatus {
+	return m.statuses[step]
+}
+
+func (m Model) bodyImportSummary() string {
+	applied := strings.TrimSpace(m.composition.BodyImportPath)
+	pending := strings.TrimSpace(m.bodyImportInput.Value())
+
+	switch {
+	case pending != "" && pending != applied:
+		return "Pending: " + summarizeText(pending)
+	case applied != "":
+		return summarizeText(applied)
+	default:
+		return "Manual editing"
+	}
+}
+
+func (m Model) decorationsToggleLabel() string {
+	if m.composition.Project.Options.Decorations {
+		return "Decorations On"
+	}
+	return "Decorations Off"
+}
+
+func joinPanels(left, right string, width int) string {
+	if right == "" {
+		return left
+	}
+	if width < 120 {
+		return lipgloss.JoinVertical(lipgloss.Left, left, "", right)
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
+}
+
+func (m Model) fullPanelWidth() int {
+	if m.width <= 0 {
+		return 104
+	}
+	return max(64, m.width-8)
+}
+
+func (m Model) mainPanelWidth() int {
+	if m.width <= 0 {
+		return 72
+	}
+	if m.width < 120 {
+		return max(52, m.width-8)
+	}
+	return int(float64(m.width) * 0.68)
+}
+
+func (m Model) summaryWidth() int {
+	if m.width <= 0 {
+		return 30
+	}
+	if m.width < 120 {
+		return max(30, m.width-8)
+	}
+	return max(30, m.width-m.mainPanelWidth()-10)
+}
+
+func (m Model) modalHeight() int {
+	return min(16, max(8, m.height-16))
+}
+
+func summarizeText(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "(empty)"
+	}
+	if len(value) <= 56 {
+		return value
+	}
+	return value[:53] + "..."
+}
+
+func styleSlotFocus(slotID string) string {
+	return "style-slot:" + slotID
+}
+
+func styleSlotBrowseFocus(slotID string) string {
+	return "style-slot-browse:" + slotID
+}
+
+func styleSlotIDFromFocus(focus string) (string, bool) {
+	if !strings.HasPrefix(focus, "style-slot:") {
+		return "", false
+	}
+	return strings.TrimPrefix(focus, "style-slot:"), true
+}
+
+func styleSlotBrowseIDFromFocus(focus string) (string, bool) {
+	if !strings.HasPrefix(focus, "style-slot-browse:") {
+		return "", false
+	}
+	return strings.TrimPrefix(focus, "style-slot-browse:"), true
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

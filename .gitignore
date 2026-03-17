@@ -4,6 +4,7 @@
 bin/
 dist/
 coverage.out
+exports/
 
 # Editor directories and files
 .idea/
