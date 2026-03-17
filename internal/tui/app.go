@@ -2,8 +2,10 @@ package tui
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -11,12 +13,14 @@ import (
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	asciipkg "github.com/jaeyoung0509/letterpress/internal/ascii"
 	"github.com/jaeyoung0509/letterpress/internal/domain"
 	exportpkg "github.com/jaeyoung0509/letterpress/internal/export"
 	renderpkg "github.com/jaeyoung0509/letterpress/internal/render"
+	"github.com/sahilm/fuzzy"
 )
 
 var (
@@ -24,30 +28,56 @@ var (
 	composeAndWriteASCII = exportpkg.ComposeAndWriteASCII
 )
 
+var commandCatalog = []string{
+	"/image ",
+	"/text-file ",
+	`/text "Happy Birthday"`,
+	"/mode ascii",
+	"/size A4",
+	"/orientation portrait",
+	`/charset "@#* ."`,
+	"/density 96",
+	"/threshold 0.42",
+	"/invert on",
+	"/export pdf ./exports/out.pdf",
+	"/export txt ./exports/out.txt",
+	"/help",
+}
+
 type KeyMap struct {
-	Run         key.Binding
-	HistoryPrev key.Binding
-	HistoryNext key.Binding
-	Clear       key.Binding
-	Quit        key.Binding
+	Run          key.Binding
+	Autocomplete key.Binding
+	HistoryPrev  key.Binding
+	HistoryNext  key.Binding
+	ScrollUp     key.Binding
+	ScrollDown   key.Binding
+	PickerPrev   key.Binding
+	PickerNext   key.Binding
+	Clear        key.Binding
+	Quit         key.Binding
 }
 
 func DefaultKeyMap() KeyMap {
 	return KeyMap{
-		Run:         key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "run command")),
-		HistoryPrev: key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "history prev")),
-		HistoryNext: key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "history next")),
-		Clear:       key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "clear input")),
-		Quit:        key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+		Run:          key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "run")),
+		Autocomplete: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "complete")),
+		HistoryPrev:  key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "history prev")),
+		HistoryNext:  key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "history next")),
+		ScrollUp:     key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "preview up")),
+		ScrollDown:   key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("pgdn", "preview down")),
+		PickerPrev:   key.NewBinding(key.WithKeys("ctrl+p"), key.WithHelp("ctrl+p", "picker prev")),
+		PickerNext:   key.NewBinding(key.WithKeys("ctrl+n"), key.WithHelp("ctrl+n", "picker next")),
+		Clear:        key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "clear")),
+		Quit:         key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	}
 }
 
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Run, k.HistoryPrev, k.HistoryNext, k.Clear, k.Quit}
+	return []key.Binding{k.Run, k.Autocomplete, k.PickerPrev, k.PickerNext, k.ScrollUp, k.ScrollDown, k.Clear, k.Quit}
 }
 
 func (k KeyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Run, k.HistoryPrev, k.HistoryNext, k.Clear, k.Quit}}
+	return [][]key.Binding{{k.Run, k.Autocomplete, k.HistoryPrev, k.HistoryNext, k.PickerPrev, k.PickerNext, k.ScrollUp, k.ScrollDown, k.Clear, k.Quit}}
 }
 
 type statusMessage struct {
@@ -82,13 +112,13 @@ func newDraft() Draft {
 }
 
 func (d Draft) EffectiveASCIIOptions() domain.ASCIIOptions {
-	opts := d.ASCII
-	if strings.TrimSpace(opts.Charset) == "" {
+	options := d.ASCII
+	if strings.TrimSpace(options.Charset) == "" {
 		if derived := normalizeGlyphSource(d.Text); derived != "" {
-			opts.Charset = derived
+			options.Charset = derived
 		}
 	}
-	return opts
+	return options
 }
 
 func (d Draft) GlyphSourceLabel() string {
@@ -96,7 +126,7 @@ func (d Draft) GlyphSourceLabel() string {
 		return "explicit charset"
 	}
 	if strings.TrimSpace(d.Text) != "" {
-		return "derived from lettering"
+		return "lettering-derived"
 	}
 	return "default ascii ramp"
 }
@@ -104,6 +134,16 @@ func (d Draft) GlyphSourceLabel() string {
 type slashCommand struct {
 	Name string
 	Args []string
+}
+
+type suggestion struct {
+	Display     string
+	Replacement string
+}
+
+type pathCandidate struct {
+	path string
+	dir  bool
 }
 
 type Model struct {
@@ -118,8 +158,14 @@ type Model struct {
 
 	draft Draft
 
+	workingDir string
+
 	preview    asciipkg.Art
 	previewErr string
+	viewport   viewport.Model
+
+	suggestions     []suggestion
+	suggestionIndex int
 
 	history      []string
 	historyIndex int
@@ -127,22 +173,32 @@ type Model struct {
 }
 
 func NewModel() Model {
-	commandInput := textinput.New()
-	commandInput.Prompt = ""
-	commandInput.Placeholder = `/image ./test.png`
-	commandInput.Width = 72
-	commandInput.Focus()
+	workingDir, err := os.Getwd()
+	if err != nil {
+		workingDir = "."
+	}
+
+	input := textinput.New()
+	input.Prompt = "> "
+	input.Placeholder = `/image ./test.png`
+	input.Width = 72
+	input.Focus()
 
 	model := Model{
 		width:        120,
 		height:       38,
 		keyMap:       DefaultKeyMap(),
 		help:         help.New(),
-		commandInput: commandInput,
+		commandInput: input,
 		draft:        newDraft(),
+		workingDir:   workingDir,
 		historyIndex: -1,
 	}
+	model.viewport = viewport.New(80, 16)
+	model.viewport.MouseWheelEnabled = true
+	model.syncLayout()
 	model.refreshPreview()
+	model.updateSuggestions()
 	return model
 }
 
@@ -161,7 +217,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.commandInput.Width = max(28, m.width-12)
+		m.syncLayout()
 		return m, nil
 	case tea.KeyMsg:
 		switch {
@@ -170,49 +226,77 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keyMap.Run):
 			m = m.executeCurrentCommand()
 			return m, nil
+		case key.Matches(msg, m.keyMap.Autocomplete):
+			m.applySuggestion()
+			return m, nil
 		case key.Matches(msg, m.keyMap.HistoryPrev):
 			m.historyPrev()
+			m.updateSuggestions()
 			return m, nil
 		case key.Matches(msg, m.keyMap.HistoryNext):
 			m.historyNext()
+			m.updateSuggestions()
+			return m, nil
+		case key.Matches(msg, m.keyMap.ScrollUp):
+			m.viewport.HalfViewUp()
+			return m, nil
+		case key.Matches(msg, m.keyMap.ScrollDown):
+			m.viewport.HalfViewDown()
+			return m, nil
+		case key.Matches(msg, m.keyMap.PickerPrev):
+			m.moveSuggestion(-1)
+			return m, nil
+		case key.Matches(msg, m.keyMap.PickerNext):
+			m.moveSuggestion(1)
 			return m, nil
 		case key.Matches(msg, m.keyMap.Clear):
 			m.commandInput.SetValue("")
+			m.updateSuggestions()
 			m.setStatus("Command cleared.", false)
 			return m, nil
 		}
 	}
 
-	var cmd tea.Cmd
-	m.commandInput, cmd = m.commandInput.Update(msg)
-	return m, cmd
+	var (
+		inputCmd    tea.Cmd
+		viewportCmd tea.Cmd
+	)
+	m.commandInput, inputCmd = m.commandInput.Update(msg)
+	m.viewport, viewportCmd = m.viewport.Update(msg)
+	m.updateSuggestions()
+	return m, tea.Batch(inputCmd, viewportCmd)
 }
 
 func (m Model) View() string {
-	header := strings.Join([]string{
-		headerStyle.Render("letterpress"),
-		subtitleStyle.Render("ASCII mode with slash-command configuration."),
-	}, "\n")
+	contentWidth := max(56, m.width-appFrameStyle.GetHorizontalFrameSize()-2)
+	contentHeight := max(18, m.height-appFrameStyle.GetVerticalFrameSize())
 
-	mainWidth := max(52, int(float64(max(80, m.width))*0.62))
-	sideWidth := max(30, max(80, m.width)-mainWidth-6)
+	header := shellCardStyle.Width(contentWidth).Render(m.renderHeaderBody())
+	status := m.renderStatusLine(contentWidth)
+	prompt := promptPaneStyle.Width(contentWidth).Render(m.renderPromptPane(contentWidth))
+	footer := mutedStyle.Width(contentWidth).Render(m.help.View(m.keyMap))
 
-	left := panelStyle.Width(mainWidth).Render(m.renderPreviewPanel(mainWidth - 6))
-	right := summaryPanelStyle.Width(sideWidth).Render(m.renderSummaryPanel(sideWidth - 6))
-	body := joinPanels(left, right, max(80, m.width)-4)
+	reservedHeight := lipgloss.Height(header) + lipgloss.Height(status) + lipgloss.Height(prompt) + lipgloss.Height(footer) + 4
+	previewBoxHeight := max(6, contentHeight-reservedHeight)
+	preview := previewPaneStyle.Width(contentWidth).Height(previewBoxHeight).Render(m.renderPreviewPane(contentWidth, previewBoxHeight))
 
-	commandPanel := panelStyle.Width(max(60, m.width-4)).Render(m.renderCommandPanel())
-	footer := mutedStyle.Render(m.help.View(m.keyMap))
+	body := strings.Join([]string{header, status, preview, prompt, footer}, "\n")
+	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Top, appFrameStyle.Render(body))
+}
 
-	return appFrameStyle.Width(max(72, m.width)).Render(strings.Join([]string{
-		header,
-		"",
-		body,
-		"",
-		commandPanel,
-		"",
-		footer,
-	}, "\n"))
+func (m *Model) syncLayout() {
+	availableWidth := max(42, m.width-appFrameStyle.GetHorizontalFrameSize()-6)
+	m.commandInput.Width = max(24, availableWidth-4)
+
+	previewHeight := max(8, m.height-18)
+	m.viewport.Width = max(30, availableWidth)
+	m.viewport.Height = previewHeight
+	m.syncPreviewViewport()
+}
+
+func (m *Model) syncPreviewViewport() {
+	m.viewport.SetContent(m.previewContent(max(20, m.viewport.Width)))
+	m.viewport.GotoTop()
 }
 
 func (m *Model) executeCurrentCommand() Model {
@@ -230,6 +314,7 @@ func (m *Model) executeCurrentCommand() Model {
 
 	m.pushHistory(commandText)
 	m.commandInput.SetValue("")
+	m.updateSuggestions()
 
 	if err := m.applyCommand(command); err != nil {
 		m.setStatus(err.Error(), true)
@@ -255,7 +340,6 @@ func parseSlashCommand(input string) (slashCommand, error) {
 	if name == "" {
 		return slashCommand{}, fmt.Errorf("command name is required")
 	}
-
 	return slashCommand{Name: name, Args: tokens[1:]}, nil
 }
 
@@ -311,7 +395,7 @@ func tokenizeCommand(input string) ([]string, error) {
 func (m *Model) applyCommand(command slashCommand) error {
 	switch command.Name {
 	case "help":
-		m.setStatus("Commands: /image /text-file /text /mode /size /orientation /charset /density /threshold /invert /export", false)
+		m.setStatus("Commands: /image /text-file /text /size /orientation /charset /density /threshold /invert /export", false)
 		return nil
 	case "image":
 		if len(command.Args) != 1 {
@@ -449,12 +533,9 @@ func (m *Model) handleExportCommand(args []string) error {
 		return fmt.Errorf("export format must be txt or pdf")
 	}
 
-	target := m.draft.ExportOut
+	target := suggestedExportPath(format)
 	if len(args) == 2 {
 		target = args[1]
-	}
-	if strings.TrimSpace(target) == "" {
-		target = suggestedExportPath(format)
 	}
 
 	out, err := composeAndWriteASCII(m.draft.Page, m.draft.ImagePath, m.draft.EffectiveASCIIOptions(), exportpkg.ASCIIExportOptions{
@@ -474,7 +555,8 @@ func (m *Model) handleExportCommand(args []string) error {
 func (m *Model) refreshPreview() {
 	if strings.TrimSpace(m.draft.ImagePath) == "" {
 		m.preview = asciipkg.Art{}
-		m.previewErr = "Use /image <path> to generate a preview."
+		m.previewErr = ""
+		m.syncPreviewViewport()
 		return
 	}
 
@@ -482,11 +564,361 @@ func (m *Model) refreshPreview() {
 	if err != nil {
 		m.preview = asciipkg.Art{}
 		m.previewErr = err.Error()
+		m.syncPreviewViewport()
 		return
 	}
 
 	m.preview = composition.Art
 	m.previewErr = ""
+	m.syncPreviewViewport()
+}
+
+func (m *Model) updateSuggestions() {
+	current := ""
+	if len(m.suggestions) > 0 && m.suggestionIndex >= 0 && m.suggestionIndex < len(m.suggestions) {
+		current = m.suggestions[m.suggestionIndex].Display
+	}
+	m.suggestions = suggestForInput(m.commandInput.Value(), m.workingDir)
+	if len(m.suggestions) == 0 {
+		m.suggestionIndex = 0
+		return
+	}
+	for idx, item := range m.suggestions {
+		if item.Display == current {
+			m.suggestionIndex = idx
+			return
+		}
+	}
+	m.suggestionIndex = 0
+}
+
+func (m *Model) applySuggestion() {
+	if len(m.suggestions) == 0 {
+		return
+	}
+	index := clamp(m.suggestionIndex, 0, len(m.suggestions)-1)
+	m.commandInput.SetValue(m.suggestions[index].Replacement)
+	m.commandInput.CursorEnd()
+	m.updateSuggestions()
+}
+
+func (m *Model) moveSuggestion(delta int) {
+	if len(m.suggestions) == 0 {
+		return
+	}
+	m.suggestionIndex += delta
+	if m.suggestionIndex < 0 {
+		m.suggestionIndex = len(m.suggestions) - 1
+	}
+	if m.suggestionIndex >= len(m.suggestions) {
+		m.suggestionIndex = 0
+	}
+}
+
+func suggestForInput(input, cwd string) []suggestion {
+	trimmed := strings.TrimLeft(input, " ")
+	if trimmed == "" || !strings.HasPrefix(trimmed, "/") {
+		return nil
+	}
+
+	if !strings.Contains(trimmed, " ") {
+		return commandSuggestions(trimmed)
+	}
+
+	command, args, trailingSpace := splitForSuggestions(trimmed)
+	switch command {
+	case "/image":
+		partial := ""
+		if len(args) > 0 {
+			partial = args[0]
+		} else if !trailingSpace {
+			return nil
+		}
+		return pathSuggestions(cwd, trimmed, partial, []string{".png", ".jpg", ".jpeg", ".webp"})
+	case "/text-file":
+		partial := ""
+		if len(args) > 0 {
+			partial = args[0]
+		} else if !trailingSpace {
+			return nil
+		}
+		return pathSuggestions(cwd, trimmed, partial, []string{".txt", ".md"})
+	case "/export":
+		if len(args) == 0 {
+			return commandSuggestions(trimmed)
+		}
+		if len(args) == 1 && !trailingSpace {
+			return exportFormatSuggestions(trimmed, args[0])
+		}
+		format := strings.ToLower(args[0])
+		if format != "pdf" && format != "txt" {
+			return nil
+		}
+		partial := ""
+		if len(args) > 1 {
+			partial = args[1]
+		}
+		extensions := []string{"." + format}
+		return pathSuggestions(cwd, trimmed, partial, extensions)
+	default:
+		return nil
+	}
+}
+
+func splitForSuggestions(input string) (string, []string, bool) {
+	trailingSpace := strings.HasSuffix(input, " ")
+	fields := strings.Fields(input)
+	if len(fields) == 0 {
+		return "", nil, trailingSpace
+	}
+	if trailingSpace {
+		return fields[0], fields[1:], true
+	}
+	return fields[0], fields[1:], false
+}
+
+func commandSuggestions(partial string) []suggestion {
+	out := make([]suggestion, 0)
+	for _, candidate := range commandCatalog {
+		if strings.HasPrefix(candidate, partial) {
+			out = append(out, suggestion{
+				Display:     candidate,
+				Replacement: candidate,
+			})
+		}
+	}
+	return out
+}
+
+func exportFormatSuggestions(input, partial string) []suggestion {
+	options := []string{"pdf", "txt"}
+	out := make([]suggestion, 0, len(options))
+	for _, candidate := range options {
+		if strings.HasPrefix(candidate, strings.ToLower(partial)) {
+			out = append(out, suggestion{
+				Display:     candidate,
+				Replacement: "/export " + candidate + " ",
+			})
+		}
+	}
+	return out
+}
+
+func pathSuggestions(cwd, input, partial string, allowedExts []string) []suggestion {
+	candidates := suggestPathCandidates(cwd, partial, allowedExts)
+	out := make([]suggestion, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = append(out, suggestion{
+			Display:     candidate,
+			Replacement: replaceLastToken(input, partial, candidate),
+		})
+	}
+	return out
+}
+
+func suggestPathCandidates(cwd, partial string, allowedExts []string) []string {
+	partial = strings.Trim(partial, `"`)
+
+	typedDir := "."
+	prefix := partial
+	if partial != "" {
+		typedDir = filepath.Dir(partial)
+		prefix = filepath.Base(partial)
+	}
+	if partial == "" || strings.HasSuffix(partial, string(os.PathSeparator)) {
+		typedDir = partial
+		prefix = ""
+	}
+	if typedDir == "" {
+		typedDir = "."
+	}
+
+	searchDir := typedDir
+	if !filepath.IsAbs(searchDir) {
+		searchDir = filepath.Join(cwd, searchDir)
+	}
+	entries, err := os.ReadDir(searchDir)
+	if err != nil {
+		return nil
+	}
+
+	allowed := map[string]struct{}{}
+	for _, ext := range allowedExts {
+		allowed[strings.ToLower(ext)] = struct{}{}
+	}
+
+	candidates := make([]pathCandidate, 0)
+	seen := map[string]struct{}{}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(strings.ToLower(name), strings.ToLower(prefix)) {
+			continue
+		}
+
+		candidatePath := displaySuggestionPath(typedDir, name)
+		if entry.IsDir() {
+			candidatePath += "/"
+		}
+
+		if _, ok := seen[candidatePath]; ok {
+			continue
+		}
+		seen[candidatePath] = struct{}{}
+
+		if entry.IsDir() {
+			candidates = append(candidates, pathCandidate{path: candidatePath, dir: true})
+			continue
+		}
+
+		if len(allowed) > 0 {
+			if _, ok := allowed[strings.ToLower(filepath.Ext(name))]; !ok {
+				continue
+			}
+		}
+		candidates = append(candidates, pathCandidate{path: candidatePath})
+	}
+
+	if partial != "" && !filepath.IsAbs(partial) {
+		for _, extra := range fuzzyWorkspaceCandidates(cwd, partial, allowed) {
+			if _, ok := seen[extra.path]; ok {
+				continue
+			}
+			seen[extra.path] = struct{}{}
+			candidates = append(candidates, extra)
+		}
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].dir == candidates[j].dir {
+			return candidates[i].path < candidates[j].path
+		}
+		return candidates[i].dir
+	})
+
+	out := make([]string, len(candidates))
+	for i, candidate := range candidates {
+		out[i] = candidate.path
+	}
+	return out
+}
+
+func displaySuggestionPath(baseDir, name string) string {
+	if filepath.IsAbs(name) {
+		return filepath.ToSlash(name)
+	}
+
+	base := strings.TrimSpace(baseDir)
+	switch base {
+	case "", ".":
+		return "./" + filepath.ToSlash(name)
+	default:
+		clean := filepath.ToSlash(filepath.Join(base, name))
+		if strings.HasPrefix(clean, "./") || strings.HasPrefix(clean, "../") {
+			return clean
+		}
+		return "./" + clean
+	}
+}
+
+func fuzzyWorkspaceCandidates(cwd, partial string, allowed map[string]struct{}) []pathCandidate {
+	query := strings.ToLower(strings.TrimSpace(filepath.Base(partial)))
+	if query == "" {
+		return nil
+	}
+
+	all := make([]pathCandidate, 0, 32)
+	_ = filepath.WalkDir(cwd, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+
+		if path == cwd {
+			return nil
+		}
+
+		rel, err := filepath.Rel(cwd, path)
+		if err != nil {
+			return nil
+		}
+
+		depth := strings.Count(rel, string(os.PathSeparator))
+		if entry.IsDir() {
+			switch entry.Name() {
+			case ".git", ".github", "vendor", "node_modules":
+				return filepath.SkipDir
+			}
+			if depth > 3 {
+				return filepath.SkipDir
+			}
+		} else if depth > 4 {
+			return nil
+		}
+
+		display := displaySuggestionPath(filepath.Dir(rel), entry.Name())
+		name := strings.ToLower(entry.Name())
+		full := strings.ToLower(filepath.ToSlash(rel))
+		if !strings.Contains(name, query) && !strings.Contains(full, query) {
+			if len(query) < 2 {
+				return nil
+			}
+		}
+
+		if entry.IsDir() {
+			all = append(all, pathCandidate{path: display + "/", dir: true})
+			return nil
+		}
+
+		if len(allowed) > 0 {
+			if _, ok := allowed[strings.ToLower(filepath.Ext(entry.Name()))]; !ok {
+				return nil
+			}
+		}
+		all = append(all, pathCandidate{path: display})
+		return nil
+	})
+
+	if len(all) == 0 {
+		return nil
+	}
+
+	index := make([]string, len(all))
+	for i, item := range all {
+		index[i] = strings.ToLower(strings.TrimPrefix(item.path, "./"))
+	}
+
+	matches := fuzzy.Find(query, index)
+	if len(matches) == 0 {
+		sort.Slice(all, func(i, j int) bool {
+			if all[i].dir == all[j].dir {
+				return all[i].path < all[j].path
+			}
+			return all[i].dir
+		})
+		if len(all) > 12 {
+			all = all[:12]
+		}
+		return all
+	}
+
+	out := make([]pathCandidate, 0, min(12, len(matches)))
+	for _, match := range matches[:min(12, len(matches))] {
+		out = append(out, all[match.Index])
+	}
+	return out
+}
+
+func replaceLastToken(input, partial, replacement string) string {
+	if partial == "" {
+		if strings.HasSuffix(input, " ") {
+			return input + replacement
+		}
+		return input + " " + replacement
+	}
+	index := strings.LastIndex(input, partial)
+	if index == -1 {
+		return input
+	}
+	return input[:index] + replacement
 }
 
 func (m *Model) setStatus(text string, isError bool) {
@@ -533,104 +965,135 @@ func (m *Model) historyNext() {
 	m.commandInput.CursorEnd()
 }
 
-func (m Model) renderPreviewPanel(width int) string {
-	lines := []string{
-		sectionTitleStyle.Render("ASCII Preview"),
-		mutedStyle.Render("Preview refreshes after each valid command."),
+func (m Model) renderHeaderBody() string {
+	sources := []string{
+		fmt.Sprintf("image %s", summarizeText(m.draft.ImagePath)),
+		fmt.Sprintf("text %s", summarizeText(m.draft.TextFile)),
+		fmt.Sprintf("glyphs %s", m.draft.GlyphSourceLabel()),
+	}
+	if strings.TrimSpace(m.draft.TextFile) == "" && strings.TrimSpace(m.draft.Text) != "" {
+		sources[1] = fmt.Sprintf("text %s", summarizeText(m.draft.Text))
 	}
 
+	lines := []string{
+		headerStyle.Render(">_ letterpress ascii"),
+		mutedStyle.Render(fmt.Sprintf("%s %s  ·  %s  ·  density %d  ·  threshold %s  ·  invert %t",
+			m.draft.Page.Size,
+			m.draft.Page.Orientation,
+			strings.ToUpper(string(m.draft.ExportFormat)),
+			effectiveDensity(m.draft.ASCII.Density),
+			formatThreshold(m.draft.ASCII.Threshold),
+			m.draft.ASCII.Invert,
+		)),
+		mutedStyle.Render(strings.Join(sources, "  ·  ")),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) renderStatusLine(width int) string {
+	style := mutedStyle.Width(width)
+	if m.status.Text == "" {
+		return style.Render("Tip: Tab completes commands and paths. Use PgUp/PgDn to scroll the preview while the header and prompt stay fixed.")
+	}
+	if m.status.IsError {
+		return errorStyle.Width(width).Render(m.status.Text)
+	}
+	return successStyle.Width(width).Render(m.status.Text)
+}
+
+func (m Model) renderPreviewPane(width, boxHeight int) string {
+	viewportWidth := max(24, width-previewPaneStyle.GetHorizontalFrameSize())
+	viewportHeight := max(4, boxHeight-previewPaneStyle.GetVerticalFrameSize()-1)
+
+	localViewport := m.viewport
+	localViewport.Width = viewportWidth
+	localViewport.Height = viewportHeight
+	localViewport.SetContent(m.previewContent(viewportWidth))
+
+	meta := "  setup"
+	if len(m.preview.Lines) > 0 {
+		meta = fmt.Sprintf("  %d lines · scroll %d%%", len(m.preview.Lines), int(localViewport.ScrollPercent()*100))
+	}
+	title := sectionTitleStyle.Render("Preview") + mutedStyle.Render(meta)
 	if m.previewErr != "" {
-		lines = append(lines, "", errorStyle.Render(m.previewErr))
-	} else {
-		lines = append(lines, "", previewFrameStyle.Width(max(24, width-2)).Render(m.renderPreviewArt(width-8)))
+		return strings.Join([]string{
+			title,
+			errorStyle.Render(m.previewErr),
+		}, "\n")
 	}
-
-	if strings.TrimSpace(m.draft.Text) != "" {
-		lines = append(lines, "",
-			labelStyle.Render("Lettering seed"),
-			mutedStyle.Render(summarizeText(m.draft.Text)),
-		)
-	}
-
-	return strings.Join(lines, "\n")
+	return strings.Join([]string{
+		title,
+		localViewport.View(),
+	}, "\n")
 }
 
-func (m Model) renderPreviewArt(width int) string {
+func (m Model) previewContent(width int) string {
+	if strings.TrimSpace(m.draft.ImagePath) == "" {
+		lines := []string{
+			"No source image configured.",
+			"",
+			"1. /image ./test.png",
+			"2. /text-file ./test.txt",
+			"3. /export txt ./exports/out.txt",
+			"",
+			"Tab completes matching commands and file paths.",
+		}
+		return strings.Join(lines, "\n")
+	}
 	if len(m.preview.Lines) == 0 {
-		return mutedStyle.Render("(no preview)")
+		return "(preview pending)"
 	}
 
-	maxLines := max(6, min(18, m.height-18))
-	lines := make([]string, 0, maxLines)
-	for idx, line := range m.preview.Lines {
-		if idx == maxLines {
-			lines = append(lines, mutedStyle.Render("..."))
-			break
-		}
-		lines = append(lines, truncateForWidth(line, width))
+	lines := make([]string, 0, len(m.preview.Lines))
+	for _, line := range m.preview.Lines {
+		lines = append(lines, truncateRunes(line, width))
 	}
 	return strings.Join(lines, "\n")
 }
 
-func (m Model) renderSummaryPanel(width int) string {
-	lines := []string{
-		sectionTitleStyle.Render("Current State"),
-		"",
-		labelStyle.Render("Mode"),
-		string(m.draft.Mode),
-		labelStyle.Render("Page"),
-		fmt.Sprintf("%s %s", m.draft.Page.Size, m.draft.Page.Orientation),
-		labelStyle.Render("Image"),
-		summarizeText(m.draft.ImagePath),
-		labelStyle.Render("Text file"),
-		summarizeText(m.draft.TextFile),
-		labelStyle.Render("Glyph source"),
-		m.draft.GlyphSourceLabel(),
-		labelStyle.Render("Density"),
-		fmt.Sprintf("%d columns", m.effectiveDensity()),
-		labelStyle.Render("Threshold"),
-		formatThreshold(m.draft.ASCII.Threshold),
-		labelStyle.Render("Invert"),
-		fmt.Sprintf("%t", m.draft.ASCII.Invert),
-		labelStyle.Render("Export"),
-		fmt.Sprintf("%s -> %s", strings.ToUpper(string(m.draft.ExportFormat)), summarizeText(m.draft.ExportOut)),
-		"",
-		labelStyle.Render("Command Guide"),
-		"/image <path>",
-		"/text-file <path>",
-		"/text \"Happy Birthday\"",
-		"/charset \"@#* .\"",
-		"/density 96",
-		"/threshold 0.42",
-		"/export pdf ./exports/out.pdf",
-	}
+func (m Model) renderPromptPane(width int) string {
+	lines := []string{m.commandInput.View()}
 
-	if len(m.history) > 0 {
-		lines = append(lines, "", labelStyle.Render("Recent Commands"))
-		for _, command := range tailStrings(m.history, 4) {
-			lines = append(lines, truncateForWidth(command, width))
+	if len(m.suggestions) > 0 {
+		lines = append(lines, mutedStyle.Render("picker"))
+		for idx, item := range m.visibleSuggestions(6) {
+			if idx == m.suggestionIndex-m.suggestionWindowStart(6) {
+				lines = append(lines, pickerActiveStyle.Render("› "+item.Display))
+				continue
+			}
+			lines = append(lines, pickerItemStyle.Render("  "+item.Display))
 		}
+	} else {
+		lines = append(lines, mutedStyle.Render("picker"), mutedStyle.Render("  no suggestions"))
 	}
 
+	lines = append(lines, mutedStyle.Width(width).Render(`examples: /image test  ·  /text-file test  ·  /export pdf ./exports/out.pdf`))
 	return strings.Join(lines, "\n")
 }
 
-func (m Model) renderCommandPanel() string {
-	parts := []string{
-		sectionTitleStyle.Render("Command"),
-		m.commandInput.View(),
-		mutedStyle.Render("Examples: /image ./test.png  ·  /text-file ./message.txt  ·  /export txt ./exports/out.txt"),
+func (m Model) suggestionWindowStart(limit int) int {
+	if len(m.suggestions) <= limit {
+		return 0
 	}
-
-	if m.status.Text != "" {
-		if m.status.IsError {
-			parts = append(parts, errorStyle.Render(m.status.Text))
-		} else {
-			parts = append(parts, successStyle.Render(m.status.Text))
-		}
+	index := clamp(m.suggestionIndex, 0, len(m.suggestions)-1)
+	start := index - limit/2
+	if start < 0 {
+		return 0
 	}
+	maxStart := len(m.suggestions) - limit
+	if start > maxStart {
+		return maxStart
+	}
+	return start
+}
 
-	return strings.Join(parts, "\n")
+func (m Model) visibleSuggestions(limit int) []suggestion {
+	if len(m.suggestions) == 0 {
+		return nil
+	}
+	start := m.suggestionWindowStart(limit)
+	end := min(len(m.suggestions), start+limit)
+	return m.suggestions[start:end]
 }
 
 func importTextFile(path string) (string, error) {
@@ -642,7 +1105,6 @@ func importTextFile(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("could not read %s: %w", path, err)
 	}
-
 	return string(data), nil
 }
 
@@ -651,13 +1113,11 @@ func validateTextFile(path string) error {
 	if path == "" {
 		return fmt.Errorf("usage: /text-file <path>")
 	}
-
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".txt", ".md":
 	default:
 		return fmt.Errorf("text-file supports only .txt and .md files")
 	}
-
 	info, err := os.Stat(filepath.Clean(path))
 	if err != nil {
 		return fmt.Errorf("text file not found: %s", path)
@@ -673,13 +1133,11 @@ func validateImageFile(path string) error {
 	if path == "" {
 		return fmt.Errorf("usage: /image <path>")
 	}
-
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".png", ".jpg", ".jpeg", ".webp":
 	default:
 		return fmt.Errorf("image supports .png, .jpg, .jpeg, and .webp")
 	}
-
 	info, err := os.Stat(filepath.Clean(path))
 	if err != nil {
 		return fmt.Errorf("image file not found: %s", path)
@@ -696,7 +1154,6 @@ func normalizeGlyphSource(text string) string {
 	if clean == "" {
 		return ""
 	}
-
 	runes := []rune(clean)
 	if len(runes) > 128 {
 		runes = runes[:128]
@@ -714,18 +1171,26 @@ func suggestedExportPath(format exportpkg.ASCIIFormat) string {
 func summarizeText(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return "Not set"
+		return "not set"
 	}
-	if len(value) <= 48 {
+	if len([]rune(value)) <= 54 {
 		return value
 	}
-	return value[:45] + "..."
+	return truncateRunes(value, 54)
 }
 
-func truncateForWidth(text string, width int) string {
-	if width <= 0 {
-		return ""
+func centerText(text string, width int) string {
+	runes := []rune(text)
+	if len(runes) >= width {
+		return truncateRunes(text, width)
 	}
+	padding := width - len(runes)
+	left := padding / 2
+	right := padding - left
+	return strings.Repeat(" ", left) + text + strings.Repeat(" ", right)
+}
+
+func truncateRunes(text string, width int) string {
 	runes := []rune(text)
 	if len(runes) <= width {
 		return text
@@ -736,13 +1201,6 @@ func truncateForWidth(text string, width int) string {
 	return string(runes[:width-1]) + "…"
 }
 
-func tailStrings(values []string, count int) []string {
-	if len(values) <= count {
-		return values
-	}
-	return values[len(values)-count:]
-}
-
 func formatThreshold(value float64) string {
 	if value == 0 {
 		return "disabled"
@@ -750,21 +1208,11 @@ func formatThreshold(value float64) string {
 	return fmt.Sprintf("%.2f", value)
 }
 
-func (m Model) effectiveDensity() int {
-	if m.draft.ASCII.Density > 0 {
-		return m.draft.ASCII.Density
+func effectiveDensity(value int) int {
+	if value > 0 {
+		return value
 	}
 	return 80
-}
-
-func joinPanels(left, right string, totalWidth int) string {
-	if strings.TrimSpace(right) == "" {
-		return left
-	}
-	if totalWidth < 100 {
-		return left + "\n\n" + right
-	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
 }
 
 func max(a, b int) int {
@@ -779,4 +1227,14 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func clamp(value, lower, upper int) int {
+	if value < lower {
+		return lower
+	}
+	if value > upper {
+		return upper
+	}
+	return value
 }

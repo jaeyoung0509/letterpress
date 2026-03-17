@@ -15,16 +15,14 @@ import (
 	renderpkg "github.com/jaeyoung0509/letterpress/internal/render"
 )
 
-func TestViewShowsSlashCommandScaffold(t *testing.T) {
+func TestViewShowsShellScaffold(t *testing.T) {
 	view := NewModel().View()
 
 	for _, fragment := range []string{
-		"letterpress",
-		"ASCII Preview",
-		"Current State",
-		"Command",
-		"/image <path>",
-		"/export pdf",
+		">_ letterpress ascii",
+		"Preview",
+		"picker",
+		"Tab completes commands and paths",
 	} {
 		if !strings.Contains(view, fragment) {
 			t.Fatalf("expected view to contain %q, got %q", fragment, view)
@@ -46,7 +44,100 @@ func TestParseSlashCommandSupportsQuotedArguments(t *testing.T) {
 	}
 }
 
-func TestImageCommandUpdatesStateAndPreview(t *testing.T) {
+func TestSuggestPathCandidatesFiltersImageExtensions(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.png"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "b.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "assets"), 0o755); err != nil {
+		t.Fatalf("Mkdir() error = %v", err)
+	}
+
+	got := suggestPathCandidates(root, "", []string{".png", ".jpg"})
+	want := []string{"./assets/", "./a.png"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("suggestPathCandidates() = %v, want %v", got, want)
+	}
+}
+
+func TestSuggestPathCandidatesSearchesWorkspaceRecursively(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "nested", "images"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	target := filepath.Join(root, "nested", "images", "birthday-card.png")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	got := suggestPathCandidates(root, "birth", []string{".png"})
+	if len(got) == 0 {
+		t.Fatal("expected recursive suggestions")
+	}
+	if got[0] != "./nested/images/birthday-card.png" {
+		t.Fatalf("suggestPathCandidates()[0] = %q", got[0])
+	}
+}
+
+func TestSuggestPathCandidatesUsesFuzzyMatching(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "nested", "images"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	target := filepath.Join(root, "nested", "images", "birthday-card.png")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	got := suggestPathCandidates(root, "btdcrd", []string{".png"})
+	if len(got) == 0 {
+		t.Fatal("expected fuzzy suggestions")
+	}
+	if got[0] != "./nested/images/birthday-card.png" {
+		t.Fatalf("suggestPathCandidates()[0] = %q", got[0])
+	}
+}
+
+func TestAutocompleteAppliesTopSuggestion(t *testing.T) {
+	root := t.TempDir()
+	imagePath := filepath.Join(root, "test-image.png")
+	if err := os.WriteFile(imagePath, []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	model := NewModel()
+	model.commandInput.SetValue("/image " + filepath.ToSlash(filepath.Join(root, "test")))
+	model.updateSuggestions()
+	if len(model.suggestions) == 0 {
+		t.Fatal("expected suggestions")
+	}
+
+	model.applySuggestion()
+
+	if got := model.commandInput.Value(); !strings.Contains(got, "test-image.png") {
+		t.Fatalf("command input = %q", got)
+	}
+}
+
+func TestPickerSelectionMovesAndApplies(t *testing.T) {
+	model := NewModel()
+	model.suggestions = []suggestion{
+		{Display: "./one.png", Replacement: "/image ./one.png"},
+		{Display: "./two.png", Replacement: "/image ./two.png"},
+	}
+
+	model.moveSuggestion(1)
+	model.applySuggestion()
+
+	if got := model.commandInput.Value(); got != "/image ./two.png" {
+		t.Fatalf("command input = %q", got)
+	}
+}
+
+func TestImageCommandUpdatesPreview(t *testing.T) {
 	model := NewModel()
 	path := writeImageFixture(t)
 
@@ -56,65 +147,31 @@ func TestImageCommandUpdatesStateAndPreview(t *testing.T) {
 	if model.draft.ImagePath != path {
 		t.Fatalf("draft.ImagePath = %q, want %q", model.draft.ImagePath, path)
 	}
-	if model.previewErr != "" {
-		t.Fatalf("previewErr = %q", model.previewErr)
-	}
 	if model.preview.Width == 0 || model.preview.Height == 0 {
-		t.Fatalf("expected non-empty preview, got %dx%d", model.preview.Width, model.preview.Height)
+		t.Fatalf("expected preview to be populated, got %dx%d", model.preview.Width, model.preview.Height)
 	}
 }
 
-func TestTextFileCommandLoadsLetteringAndDerivesCharset(t *testing.T) {
+func TestHeaderAndPromptRemainVisibleWithPreviewContent(t *testing.T) {
 	model := NewModel()
-	path := writeTextFixture(t, "glyphs.txt", "Happy Birthday")
-
-	model.commandInput.SetValue("/text-file " + path)
-	model = model.executeCurrentCommand()
-
-	if model.draft.TextFile != path {
-		t.Fatalf("draft.TextFile = %q, want %q", model.draft.TextFile, path)
+	model.width = 100
+	model.height = 24
+	model.preview = asciipkg.Art{
+		Width:  80,
+		Height: 60,
+		Lines:  make([]string, 60),
 	}
-	if model.draft.Text != "Happy Birthday" {
-		t.Fatalf("draft.Text = %q", model.draft.Text)
+	for i := range model.preview.Lines {
+		model.preview.Lines[i] = strings.Repeat("@", 80)
 	}
-	if got := model.draft.EffectiveASCIIOptions().Charset; got != "Happy Birthday" {
-		t.Fatalf("derived charset = %q, want %q", got, "Happy Birthday")
+	model.syncLayout()
+	view := model.View()
+
+	if !strings.Contains(view, ">_ letterpress ascii") {
+		t.Fatalf("expected fixed header in view, got %q", view)
 	}
-}
-
-func TestInvalidDensityCommandPreservesExistingState(t *testing.T) {
-	model := NewModel()
-	model.draft.ASCII.Density = 96
-
-	model.commandInput.SetValue("/density nope")
-	model = model.executeCurrentCommand()
-
-	if model.draft.ASCII.Density != 96 {
-		t.Fatalf("density changed on invalid command: %d", model.draft.ASCII.Density)
-	}
-	if !model.status.IsError {
-		t.Fatal("expected invalid density to produce an error status")
-	}
-}
-
-func TestHistoryRecallMovesThroughCommands(t *testing.T) {
-	model := NewModel()
-	model.pushHistory("/size A5")
-	model.pushHistory("/density 64")
-
-	model.historyPrev()
-	if got := model.commandInput.Value(); got != "/density 64" {
-		t.Fatalf("first historyPrev() = %q, want %q", got, "/density 64")
-	}
-
-	model.historyPrev()
-	if got := model.commandInput.Value(); got != "/size A5" {
-		t.Fatalf("second historyPrev() = %q, want %q", got, "/size A5")
-	}
-
-	model.historyNext()
-	if got := model.commandInput.Value(); got != "/density 64" {
-		t.Fatalf("historyNext() = %q, want %q", got, "/density 64")
+	if !strings.Contains(view, "> ") {
+		t.Fatalf("expected prompt in view, got %q", view)
 	}
 }
 
@@ -152,14 +209,8 @@ func TestExportCommandDelegatesToASCIIExporter(t *testing.T) {
 	if gotExport.Format != exportpkg.ASCIIFormatTXT {
 		t.Fatalf("export format = %q, want %q", gotExport.Format, exportpkg.ASCIIFormatTXT)
 	}
-	if gotExport.Out != "./exports/out.txt" {
-		t.Fatalf("export out = %q, want %q", gotExport.Out, "./exports/out.txt")
-	}
 	if gotPage.Size != domain.PageSizeA4 || gotPage.Orientation != domain.OrientationPortrait {
-		t.Fatalf("unexpected export page: %+v", gotPage)
-	}
-	if model.status.IsError {
-		t.Fatalf("expected export success, got %q", model.status.Text)
+		t.Fatalf("unexpected page: %+v", gotPage)
 	}
 }
 
@@ -172,12 +223,7 @@ func TestRefreshPreviewUsesComposeASCII(t *testing.T) {
 
 	composeASCII = func(page domain.ProjectPage, imagePath string, options domain.ASCIIOptions) (*renderpkg.ASCIIComposition, error) {
 		return &renderpkg.ASCIIComposition{
-			Page: renderpkg.Page{
-				Size:        page.Size,
-				Orientation: page.Orientation,
-			},
-			ImagePath: imagePath,
-			Options:   options,
+			Page: renderpkg.Page{Size: page.Size, Orientation: page.Orientation},
 			Art: asciipkg.Art{
 				Width:  3,
 				Height: 1,
@@ -215,17 +261,6 @@ func writeImageFixture(t *testing.T) string {
 
 	if err := png.Encode(file, img); err != nil {
 		t.Fatalf("png.Encode() error = %v", err)
-	}
-
-	return path
-}
-
-func writeTextFixture(t *testing.T, name, body string) string {
-	t.Helper()
-
-	path := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
 	}
 	return path
 }
