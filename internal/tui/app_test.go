@@ -17,6 +17,7 @@ func TestViewShowsShellLayout(t *testing.T) {
 		"[Forward:",
 		"[Back:",
 		"[Quit:",
+		"Composition in progress",
 	} {
 		if !strings.Contains(view, fragment) {
 			t.Fatalf("expected view to contain %q, got %q", fragment, view)
@@ -27,6 +28,7 @@ func TestViewShowsShellLayout(t *testing.T) {
 func TestStateAdvancesAndRewinds(t *testing.T) {
 	model := NewModel()
 	initialView := model.View()
+	initialSummary := model.composition.Summary()
 
 	model.state = model.state.withNext()
 	if model.state.Current != StepSize {
@@ -45,5 +47,9 @@ func TestStateAdvancesAndRewinds(t *testing.T) {
 
 	if model.View() != initialView {
 		t.Fatalf("expected view to return to the initial state after rewinding")
+	}
+
+	if model.composition.Summary() != initialSummary {
+		t.Fatalf("composition summary changed after navigation: before=%q after=%q", initialSummary, model.composition.Summary())
 	}
 }

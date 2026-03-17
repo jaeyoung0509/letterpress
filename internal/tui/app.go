@@ -105,16 +105,18 @@ func DefaultKeyMap() KeyMap {
 }
 
 type Model struct {
-	state  State
-	keyMap KeyMap
-	width  int
-	height int
+	state       State
+	composition CompositionState
+	keyMap      KeyMap
+	width       int
+	height      int
 }
 
 func NewModel() Model {
 	return Model{
-		state:  newState(),
-		keyMap: DefaultKeyMap(),
+		state:       newState(),
+		composition: newCompositionState(),
+		keyMap:      DefaultKeyMap(),
 	}
 }
 
@@ -156,6 +158,8 @@ func (m Model) View() string {
 		"",
 		m.renderRoute(),
 		"",
+		m.renderCompositionSummary(),
+		"",
 		fmt.Sprintf("Viewport: %dx%d", m.width, m.height),
 		"",
 		m.renderKeyLegend(),
@@ -185,6 +189,10 @@ func (m Model) renderRoute() string {
 	}
 
 	return fmt.Sprintf("%s\n%s\n\n%s", route.Title, route.Description, route.Placeholder)
+}
+
+func (m Model) renderCompositionSummary() string {
+	return fmt.Sprintf("Composition in progress (%s)", m.composition.Summary())
 }
 
 func (m Model) renderKeyLegend() string {
