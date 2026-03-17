@@ -30,14 +30,22 @@ var (
 
 var commandCatalog = []string{
 	"/image ",
-	"/text-file ",
-	`/text "Happy Birthday"`,
-	"/mode ascii",
+	"/fill-file ",
+	`/fill-text "Happy Birthday"`,
+	"/mode tone",
+	"/mode outline",
+	"/mode fill",
+	"/mode hybrid",
+	"/mode vector",
 	"/size A4",
 	"/orientation portrait",
-	`/charset "@#* ."`,
+	`/tone-charset "@#* ."`,
 	"/density 96",
 	"/threshold 0.42",
+	"/gamma 1.20",
+	"/edge-threshold 0.35",
+	"/dither floyd",
+	"/cell-aspect 0.48",
 	"/invert on",
 	"/export pdf ./exports/out.pdf",
 	"/export txt ./exports/out.txt",
@@ -104,7 +112,10 @@ func newDraft() Draft {
 			Orientation: domain.OrientationPortrait,
 		},
 		ASCII: domain.ASCIIOptions{
-			Density: 80,
+			Mode:       domain.ASCIIModeTone,
+			Density:    80,
+			Dither:     domain.DitherModeOff,
+			CellAspect: asciiDefaultCellAspect(),
 		},
 		ExportFormat: exportpkg.ASCIIFormatPDF,
 		ExportOut:    suggestedExportPath(exportpkg.ASCIIFormatPDF),
@@ -113,22 +124,27 @@ func newDraft() Draft {
 
 func (d Draft) EffectiveASCIIOptions() domain.ASCIIOptions {
 	options := d.ASCII
-	if strings.TrimSpace(options.Charset) == "" {
-		if derived := normalizeGlyphSource(d.Text); derived != "" {
-			options.Charset = derived
-		}
+	if strings.TrimSpace(options.FillText) == "" {
+		options.FillText = normalizeFillText(d.Text)
 	}
 	return options
 }
 
-func (d Draft) GlyphSourceLabel() string {
-	if strings.TrimSpace(d.ASCII.Charset) != "" {
-		return "explicit charset"
+func (d Draft) ToneLabel() string {
+	if strings.TrimSpace(d.ASCII.ToneCharset) != "" || strings.TrimSpace(d.ASCII.Charset) != "" {
+		return summarizeText(d.EffectiveASCIIOptions().EffectiveToneCharset())
+	}
+	return "default ramp"
+}
+
+func (d Draft) FillLabel() string {
+	if strings.TrimSpace(d.TextFile) != "" {
+		return summarizeText(d.TextFile)
 	}
 	if strings.TrimSpace(d.Text) != "" {
-		return "lettering-derived"
+		return summarizeText(normalizeFillText(d.Text))
 	}
-	return "default ascii ramp"
+	return "not set"
 }
 
 type slashCommand struct {
@@ -395,7 +411,7 @@ func tokenizeCommand(input string) ([]string, error) {
 func (m *Model) applyCommand(command slashCommand) error {
 	switch command.Name {
 	case "help":
-		m.setStatus("Commands: /image /text-file /text /size /orientation /charset /density /threshold /invert /export", false)
+		m.setStatus("Commands: /image /fill-file /fill-text /mode /tone-charset /density /threshold /gamma /edge-threshold /dither /cell-aspect /export", false)
 		return nil
 	case "image":
 		if len(command.Args) != 1 {
@@ -408,35 +424,47 @@ func (m *Model) applyCommand(command slashCommand) error {
 		m.refreshPreview()
 		m.setStatus(fmt.Sprintf("Image set to %s.", command.Args[0]), false)
 		return nil
-	case "text-file":
+	case "fill-file", "text-file":
 		if len(command.Args) != 1 {
-			return fmt.Errorf("usage: /text-file <path>")
+			return fmt.Errorf("usage: /fill-file <path>")
 		}
 		body, err := importTextFile(command.Args[0])
 		if err != nil {
 			return err
 		}
 		m.draft.TextFile = command.Args[0]
-		m.draft.Text = body
+		m.draft.Text = normalizeFillText(body)
+		m.draft.ASCII.FillText = ""
 		m.refreshPreview()
-		m.setStatus(fmt.Sprintf("Loaded lettering text from %s.", command.Args[0]), false)
+		m.setStatus(fmt.Sprintf("Loaded fill text from %s.", command.Args[0]), false)
 		return nil
-	case "text":
+	case "fill-text", "text":
 		if len(command.Args) == 0 {
-			return fmt.Errorf("usage: /text <lettering>")
+			return fmt.Errorf("usage: /fill-text <lettering>")
 		}
-		m.draft.Text = strings.Join(command.Args, " ")
+		m.draft.Text = normalizeFillText(strings.Join(command.Args, " "))
 		m.draft.TextFile = ""
+		m.draft.ASCII.FillText = ""
 		m.refreshPreview()
-		m.setStatus("Lettering text updated.", false)
+		m.setStatus("Fill text updated.", false)
 		return nil
 	case "mode":
-		if len(command.Args) != 1 || strings.ToLower(command.Args[0]) != string(domain.RenderModeASCII) {
-			return fmt.Errorf("usage: /mode ascii")
+		if len(command.Args) != 1 {
+			return fmt.Errorf("usage: /mode <tone|outline|fill|hybrid|vector>")
 		}
 		m.draft.Mode = domain.RenderModeASCII
+		mode := domain.ASCIIMode(strings.ToLower(command.Args[0]))
+		if mode == "ascii" {
+			mode = domain.ASCIIModeTone
+		}
+		switch mode {
+		case domain.ASCIIModeTone, domain.ASCIIModeOutline, domain.ASCIIModeFill, domain.ASCIIModeHybrid, domain.ASCIIModeVector:
+			m.draft.ASCII.Mode = mode
+		default:
+			return fmt.Errorf("mode must be tone, outline, fill, hybrid, or vector")
+		}
 		m.refreshPreview()
-		m.setStatus("Render mode set to ascii.", false)
+		m.setStatus(fmt.Sprintf("Render mode set to %s.", m.draft.ASCII.Mode), false)
 		return nil
 	case "size":
 		if len(command.Args) != 1 {
@@ -466,13 +494,15 @@ func (m *Model) applyCommand(command slashCommand) error {
 		default:
 			return fmt.Errorf("orientation must be portrait or landscape")
 		}
-	case "charset":
+	case "tone-charset", "charset":
 		if len(command.Args) == 0 {
-			return fmt.Errorf("usage: /charset <glyphs>")
+			return fmt.Errorf("usage: /tone-charset <glyphs>")
 		}
-		m.draft.ASCII.Charset = strings.Join(command.Args, " ")
+		value := strings.Join(command.Args, " ")
+		m.draft.ASCII.ToneCharset = value
+		m.draft.ASCII.Charset = value
 		m.refreshPreview()
-		m.setStatus("Explicit charset updated.", false)
+		m.setStatus("Tone charset updated.", false)
 		return nil
 	case "density":
 		if len(command.Args) != 1 {
@@ -497,6 +527,56 @@ func (m *Model) applyCommand(command slashCommand) error {
 		m.draft.ASCII.Threshold = threshold
 		m.refreshPreview()
 		m.setStatus(fmt.Sprintf("Threshold set to %.2f.", threshold), false)
+		return nil
+	case "gamma":
+		if len(command.Args) != 1 {
+			return fmt.Errorf("usage: /gamma <value>")
+		}
+		gamma, err := strconv.ParseFloat(command.Args[0], 64)
+		if err != nil || gamma <= 0 {
+			return fmt.Errorf("gamma must be greater than 0")
+		}
+		m.draft.ASCII.Gamma = gamma
+		m.refreshPreview()
+		m.setStatus(fmt.Sprintf("Gamma set to %.2f.", gamma), false)
+		return nil
+	case "edge-threshold":
+		if len(command.Args) != 1 {
+			return fmt.Errorf("usage: /edge-threshold <0..1>")
+		}
+		edgeThreshold, err := strconv.ParseFloat(command.Args[0], 64)
+		if err != nil || edgeThreshold < 0 || edgeThreshold > 1 {
+			return fmt.Errorf("edge-threshold must be between 0 and 1")
+		}
+		m.draft.ASCII.EdgeThreshold = edgeThreshold
+		m.refreshPreview()
+		m.setStatus(fmt.Sprintf("Edge threshold set to %.2f.", edgeThreshold), false)
+		return nil
+	case "dither":
+		if len(command.Args) != 1 {
+			return fmt.Errorf("usage: /dither <off|floyd>")
+		}
+		dither := domain.DitherMode(strings.ToLower(command.Args[0]))
+		switch dither {
+		case domain.DitherModeOff, domain.DitherModeFloyd:
+			m.draft.ASCII.Dither = dither
+		default:
+			return fmt.Errorf("dither must be off or floyd")
+		}
+		m.refreshPreview()
+		m.setStatus(fmt.Sprintf("Dither set to %s.", dither), false)
+		return nil
+	case "cell-aspect":
+		if len(command.Args) != 1 {
+			return fmt.Errorf("usage: /cell-aspect <value>")
+		}
+		cellAspect, err := strconv.ParseFloat(command.Args[0], 64)
+		if err != nil || cellAspect <= 0 {
+			return fmt.Errorf("cell-aspect must be greater than 0")
+		}
+		m.draft.ASCII.CellAspect = cellAspect
+		m.refreshPreview()
+		m.setStatus(fmt.Sprintf("Cell aspect set to %.2f.", cellAspect), false)
 		return nil
 	case "invert":
 		if len(command.Args) != 1 {
@@ -635,7 +715,7 @@ func suggestForInput(input, cwd string) []suggestion {
 			return nil
 		}
 		return pathSuggestions(cwd, trimmed, partial, []string{".png", ".jpg", ".jpeg", ".webp"})
-	case "/text-file":
+	case "/fill-file", "/text-file":
 		partial := ""
 		if len(args) > 0 {
 			partial = args[0]
@@ -968,21 +1048,25 @@ func (m *Model) historyNext() {
 func (m Model) renderHeaderBody() string {
 	sources := []string{
 		fmt.Sprintf("image %s", summarizeText(m.draft.ImagePath)),
-		fmt.Sprintf("text %s", summarizeText(m.draft.TextFile)),
-		fmt.Sprintf("glyphs %s", m.draft.GlyphSourceLabel()),
-	}
-	if strings.TrimSpace(m.draft.TextFile) == "" && strings.TrimSpace(m.draft.Text) != "" {
-		sources[1] = fmt.Sprintf("text %s", summarizeText(m.draft.Text))
+		fmt.Sprintf("fill %s", m.draft.FillLabel()),
+		fmt.Sprintf("tone %s", m.draft.ToneLabel()),
+		fmt.Sprintf("dither %s", effectiveDither(m.draft.ASCII.Dither)),
 	}
 
 	lines := []string{
 		headerStyle.Render(">_ letterpress ascii"),
-		mutedStyle.Render(fmt.Sprintf("%s %s  ·  %s  ·  density %d  ·  threshold %s  ·  invert %t",
+		mutedStyle.Render(fmt.Sprintf("%s  ·  %s %s  ·  %s  ·  density %d  ·  threshold %s",
+			strings.ToUpper(string(m.draft.EffectiveASCIIOptions().EffectiveMode())),
 			m.draft.Page.Size,
 			m.draft.Page.Orientation,
 			strings.ToUpper(string(m.draft.ExportFormat)),
 			effectiveDensity(m.draft.ASCII.Density),
 			formatThreshold(m.draft.ASCII.Threshold),
+		)),
+		mutedStyle.Render(fmt.Sprintf("gamma %s  ·  edge %s  ·  aspect %s  ·  invert %t",
+			formatFloatOrDefault(m.draft.ASCII.Gamma, "default"),
+			formatThreshold(m.draft.ASCII.EdgeThreshold),
+			formatFloatOrDefault(m.draft.ASCII.CellAspect, "default"),
 			m.draft.ASCII.Invert,
 		)),
 		mutedStyle.Render(strings.Join(sources, "  ·  ")),
@@ -1033,8 +1117,9 @@ func (m Model) previewContent(width int) string {
 			"No source image configured.",
 			"",
 			"1. /image ./test.png",
-			"2. /text-file ./test.txt",
-			"3. /export txt ./exports/out.txt",
+			"2. /fill-file ./test.txt",
+			"3. /mode hybrid",
+			"4. /export pdf ./exports/out.pdf",
 			"",
 			"Tab completes matching commands and file paths.",
 		}
@@ -1067,7 +1152,7 @@ func (m Model) renderPromptPane(width int) string {
 		lines = append(lines, mutedStyle.Render("picker"), mutedStyle.Render("  no suggestions"))
 	}
 
-	lines = append(lines, mutedStyle.Width(width).Render(`examples: /image test  ·  /text-file test  ·  /export pdf ./exports/out.pdf`))
+	lines = append(lines, mutedStyle.Width(width).Render(`examples: /image test  ·  /fill-file test  ·  /mode hybrid  ·  /tone-charset "@%#*+=-:. "`))
 	return strings.Join(lines, "\n")
 }
 
@@ -1148,24 +1233,21 @@ func validateImageFile(path string) error {
 	return nil
 }
 
-func normalizeGlyphSource(text string) string {
+func normalizeFillText(text string) string {
 	replacer := strings.NewReplacer("\r", " ", "\n", " ", "\t", " ")
 	clean := strings.Join(strings.Fields(replacer.Replace(text)), " ")
-	if clean == "" {
-		return ""
+	if len([]rune(clean)) > 256 {
+		return string([]rune(clean)[:256])
 	}
-	runes := []rune(clean)
-	if len(runes) > 128 {
-		runes = runes[:128]
-	}
-	if len(runes) == 1 {
-		return string(append(runes, ' '))
-	}
-	return string(runes)
+	return clean
 }
 
 func suggestedExportPath(format exportpkg.ASCIIFormat) string {
 	return filepath.Join("exports", "ascii-art."+string(format))
+}
+
+func asciiDefaultCellAspect() float64 {
+	return asciipkg.DefaultCellAspectRatio
 }
 
 func summarizeText(value string) string {
@@ -1208,11 +1290,25 @@ func formatThreshold(value float64) string {
 	return fmt.Sprintf("%.2f", value)
 }
 
+func formatFloatOrDefault(value float64, fallback string) string {
+	if value == 0 {
+		return fallback
+	}
+	return fmt.Sprintf("%.2f", value)
+}
+
 func effectiveDensity(value int) int {
 	if value > 0 {
 		return value
 	}
 	return 80
+}
+
+func effectiveDither(value domain.DitherMode) string {
+	if value == "" {
+		return string(domain.DitherModeOff)
+	}
+	return string(value)
 }
 
 func max(a, b int) int {

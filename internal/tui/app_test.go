@@ -152,6 +152,34 @@ func TestImageCommandUpdatesPreview(t *testing.T) {
 	}
 }
 
+func TestFillFileCommandLoadsFillText(t *testing.T) {
+	model := NewModel()
+	path := filepath.Join(t.TempDir(), "message.txt")
+	if err := os.WriteFile(path, []byte("Happy Birthday\nFrom Letterpress"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	model.commandInput.SetValue("/fill-file " + path)
+	model = model.executeCurrentCommand()
+
+	if model.draft.TextFile != path {
+		t.Fatalf("draft.TextFile = %q, want %q", model.draft.TextFile, path)
+	}
+	if model.draft.Text != "Happy Birthday From Letterpress" {
+		t.Fatalf("draft.Text = %q", model.draft.Text)
+	}
+}
+
+func TestModeCommandAcceptsVectorMode(t *testing.T) {
+	model := NewModel()
+	model.commandInput.SetValue("/mode vector")
+	model = model.executeCurrentCommand()
+
+	if model.draft.ASCII.Mode != domain.ASCIIModeVector {
+		t.Fatalf("mode = %q", model.draft.ASCII.Mode)
+	}
+}
+
 func TestHeaderAndPromptRemainVisibleWithPreviewContent(t *testing.T) {
 	model := NewModel()
 	model.width = 100
@@ -179,6 +207,7 @@ func TestExportCommandDelegatesToASCIIExporter(t *testing.T) {
 	model := NewModel()
 	model.draft.ImagePath = "/tmp/test.png"
 	model.draft.Text = "HELLO"
+	model.draft.ASCII.Mode = domain.ASCIIModeHybrid
 
 	origExporter := composeAndWriteASCII
 	defer func() { composeAndWriteASCII = origExporter }()
@@ -203,8 +232,11 @@ func TestExportCommandDelegatesToASCIIExporter(t *testing.T) {
 	if gotImage != "/tmp/test.png" {
 		t.Fatalf("image path = %q, want %q", gotImage, "/tmp/test.png")
 	}
-	if gotASCII.Charset != "HELLO" {
-		t.Fatalf("ascii charset = %q, want %q", gotASCII.Charset, "HELLO")
+	if gotASCII.FillText != "HELLO" {
+		t.Fatalf("fill text = %q, want %q", gotASCII.FillText, "HELLO")
+	}
+	if gotASCII.EffectiveToneCharset() == "HELLO" {
+		t.Fatalf("tone charset should not be derived from fill text")
 	}
 	if gotExport.Format != exportpkg.ASCIIFormatTXT {
 		t.Fatalf("export format = %q, want %q", gotExport.Format, exportpkg.ASCIIFormatTXT)
@@ -225,6 +257,7 @@ func TestRefreshPreviewUsesComposeASCII(t *testing.T) {
 		return &renderpkg.ASCIIComposition{
 			Page: renderpkg.Page{Size: page.Size, Orientation: page.Orientation},
 			Art: asciipkg.Art{
+				Mode:   domain.ASCIIModeTone,
 				Width:  3,
 				Height: 1,
 				Lines:  []string{"ABC"},

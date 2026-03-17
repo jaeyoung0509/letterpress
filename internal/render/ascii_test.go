@@ -18,8 +18,9 @@ func TestComposeASCIIBuildsPageAwareComposition(t *testing.T) {
 		Size:        domain.PageSizeA5,
 		Orientation: domain.OrientationLandscape,
 	}, imagePath, domain.ASCIIOptions{
-		Charset: "@ ",
-		Density: 4,
+		Mode:        domain.ASCIIModeOutline,
+		ToneCharset: "@ ",
+		Density:     4,
 	})
 	if err != nil {
 		t.Fatalf("ComposeASCII() error = %v", err)
@@ -36,6 +37,9 @@ func TestComposeASCIIBuildsPageAwareComposition(t *testing.T) {
 	}
 	if composition.ImagePath != imagePath {
 		t.Fatalf("image path = %q, want %q", composition.ImagePath, imagePath)
+	}
+	if len(composition.Segments) == 0 {
+		t.Fatal("expected contour segments")
 	}
 }
 

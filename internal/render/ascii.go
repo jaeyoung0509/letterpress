@@ -13,6 +13,7 @@ type ASCIIComposition struct {
 	Page      Page
 	Options   domain.ASCIIOptions
 	Art       asciipkg.Art
+	Segments  []asciipkg.Segment
 }
 
 func ComposeASCII(page domain.ProjectPage, imagePath string, options domain.ASCIIOptions) (*ASCIIComposition, error) {
@@ -37,7 +38,8 @@ func ComposeASCII(page domain.ProjectPage, imagePath string, options domain.ASCI
 			Orientation: page.Orientation,
 			Dimensions:  dimensions,
 		},
-		Options: options,
-		Art:     art,
+		Options:  options,
+		Art:      art,
+		Segments: asciipkg.ExtractContourSegments(art, options.EdgeThreshold),
 	}, nil
 }

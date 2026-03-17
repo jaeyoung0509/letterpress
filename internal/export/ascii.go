@@ -3,6 +3,7 @@ package export
 import (
 	"fmt"
 	"image/color"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,6 +78,9 @@ func WriteASCII(composition *render.ASCIIComposition, options ASCIIExportOptions
 
 	switch options.Format {
 	case ASCIIFormatTXT:
+		if composition.Options.EffectiveMode() == domain.ASCIIModeVector {
+			return "", fmt.Errorf("vector mode supports PDF export only")
+		}
 		if err := writeASCIITXT(composition, out); err != nil {
 			return "", err
 		}
@@ -119,6 +123,14 @@ func writeASCIITXT(composition *render.ASCIIComposition, out string) error {
 }
 
 func writeASCIIPDF(composition *render.ASCIIComposition, out string, options ASCIIExportOptions) error {
+	if composition.Options.EffectiveMode() == domain.ASCIIModeVector {
+		return writeVectorASCIIPDF(composition, out, options)
+	}
+
+	return writeRasterASCIIPDF(composition, out, options)
+}
+
+func writeRasterASCIIPDF(composition *render.ASCIIComposition, out string, options ASCIIExportOptions) error {
 	layout, err := resolveASCIILayout(composition, options)
 	if err != nil {
 		return err
@@ -138,6 +150,86 @@ func writeASCIIPDF(composition *render.ASCIIComposition, out string, options ASC
 	for index, line := range composition.Art.Lines {
 		y := topY - float64(index)*layout.lineStepMM
 		ctx.DrawText(layout.marginMM, y, canvas.NewTextLine(layout.face, line, canvas.Left))
+	}
+
+	pdf := pdfrenderer.New(
+		file,
+		float64(page.Dimensions.WidthMM),
+		float64(page.Dimensions.HeightMM),
+		nil,
+	)
+	surface.RenderTo(pdf)
+	if err := pdf.Close(); err != nil {
+		return fmt.Errorf("finalize ascii pdf %q: %w", out, err)
+	}
+
+	return nil
+}
+
+func writeVectorASCIIPDF(composition *render.ASCIIComposition, out string, options ASCIIExportOptions) error {
+	if len(composition.Segments) == 0 {
+		return writeRasterASCIIPDF(composition, out, options)
+	}
+
+	fillText := composition.Options.FillText
+	if strings.TrimSpace(fillText) == "" {
+		fillText = composition.Art.FillText
+	}
+	fillText = strings.TrimSpace(fillText)
+	if fillText == "" {
+		return fmt.Errorf("vector mode requires fill text")
+	}
+
+	file, err := os.Create(out)
+	if err != nil {
+		return fmt.Errorf("create ascii pdf %q: %w", out, err)
+	}
+	defer file.Close()
+
+	page := composition.Page
+	marginMM := options.MarginMM
+	if marginMM <= 0 {
+		marginMM = defaultASCIIMarginMM
+	}
+	safeWidth := float64(page.Dimensions.WidthMM) - marginMM*2
+	safeHeight := float64(page.Dimensions.HeightMM) - marginMM*2
+	if safeWidth <= 0 || safeHeight <= 0 {
+		return fmt.Errorf("ascii export margin %.2fmm leaves no printable area", marginMM)
+	}
+
+	fontSizePt := options.FontSizePt
+	if fontSizePt <= 0 {
+		fontSizePt = 10
+	}
+	face, err := monoFace(fontSizePt)
+	if err != nil {
+		return err
+	}
+
+	surface := canvas.New(float64(page.Dimensions.WidthMM), float64(page.Dimensions.HeightMM))
+	ctx := canvas.NewContext(surface)
+
+	maxSegments := minInt(48, len(composition.Segments))
+	for _, segment := range composition.Segments[:maxSegments] {
+		x1, y1 := segmentToCanvasPoint(segment.X1, segment.Y1, composition.Art.Width, composition.Art.Height, marginMM, safeWidth, safeHeight)
+		x2, y2 := segmentToCanvasPoint(segment.X2, segment.Y2, composition.Art.Width, composition.Art.Height, marginMM, safeWidth, safeHeight)
+
+		length := math.Hypot(x2-x1, y2-y1)
+		if length < 8 {
+			continue
+		}
+
+		text := repeatTextToLength(fillText, face, length)
+		if text == "" {
+			continue
+		}
+
+		angle := math.Atan2(y2-y1, x2-x1) * 180 / math.Pi
+		ctx.Push()
+		ctx.Translate(x1, y1)
+		ctx.Rotate(angle)
+		ctx.DrawText(0, 0, canvas.NewTextLine(face, text, canvas.Left))
+		ctx.Pop()
 	}
 
 	pdf := pdfrenderer.New(
@@ -236,6 +328,45 @@ func asciiLineWidth(face *canvas.FontFace, columns int) float64 {
 	return sample.Bounds().W()
 }
 
+func repeatTextToLength(fillText string, face *canvas.FontFace, maxWidth float64) string {
+	fillText = strings.TrimSpace(fillText)
+	if fillText == "" || maxWidth <= 0 {
+		return ""
+	}
+
+	seed := fillText
+	if !strings.Contains(seed, " ") {
+		seed += " "
+	}
+
+	var builder strings.Builder
+	for builder.Len() < 8 || canvas.NewTextLine(face, builder.String(), canvas.Left).Bounds().W() < maxWidth {
+		builder.WriteString(seed)
+		if builder.Len() > 4096 {
+			break
+		}
+	}
+
+	text := strings.TrimSpace(builder.String())
+	if text == "" {
+		return fillText
+	}
+
+	runes := []rune(text)
+	for len(runes) > 1 && canvas.NewTextLine(face, string(runes), canvas.Left).Bounds().W() > maxWidth {
+		runes = runes[:len(runes)-1]
+	}
+	return strings.TrimSpace(string(runes))
+}
+
+func segmentToCanvasPoint(x, y float64, artWidth, artHeight int, marginMM, safeWidth, safeHeight float64) (float64, float64) {
+	nx := x / float64(maxInt(1, artWidth))
+	ny := y / float64(maxInt(1, artHeight))
+	canvasX := marginMM + nx*safeWidth
+	canvasY := marginMM + safeHeight - ny*safeHeight
+	return canvasX, canvasY
+}
+
 func monoFace(sizePt float64) (*canvas.FontFace, error) {
 	if err := ensureMonoFamily(); err != nil {
 		return nil, err
@@ -269,4 +400,18 @@ func (f ASCIIFormat) valid() bool {
 	default:
 		return false
 	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
