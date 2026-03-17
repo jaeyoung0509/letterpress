@@ -26,6 +26,7 @@ func newCompositionState() CompositionState {
 			},
 			Export: domain.ExportOptions{
 				Format: domain.ExportFormatPDF,
+				Out:    "output/letterpress",
 			},
 		},
 		DecorationSelections: map[string]bool{},

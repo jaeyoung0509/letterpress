@@ -20,6 +20,7 @@ type TemplateEntry struct {
 	Source             string
 	ImageSlots         []domain.Slot
 	DecorationAssets   []domain.Asset
+	Template           domain.Template
 }
 
 func loadTemplateEntries() []TemplateEntry {
@@ -93,6 +94,7 @@ func loadTemplateEntries() []TemplateEntry {
 			Source:             path,
 			ImageSlots:         imageSlots,
 			DecorationAssets:   decorationAssets,
+			Template:           tmpl,
 		}
 
 		if entry.DefaultOrientation == "" {

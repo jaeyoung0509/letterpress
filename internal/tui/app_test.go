@@ -5,6 +5,9 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/jaeyoung0509/letterpress/internal/domain"
+	"github.com/jaeyoung0509/letterpress/internal/export"
+	templatepkg "github.com/jaeyoung0509/letterpress/internal/template"
 )
 
 func TestViewShowsShellLayout(t *testing.T) {
@@ -118,6 +121,102 @@ func TestContentEditingFields(t *testing.T) {
 	model = model.deleteContentRune()
 	if model.composition.Project.Content.Body != "Messag" {
 		t.Fatalf("expected body to trim last rune, got %q", model.composition.Project.Content.Body)
+	}
+}
+
+func TestReviewPathInputApplies(t *testing.T) {
+	model := NewModel()
+	model.state.Current = StepReview
+	model.reviewPathInput = "exports/card"
+	model.composition.Project.Export.Out = ""
+
+	model = model.applyReviewPathInput()
+
+	if model.composition.Project.Export.Out != "exports/card" {
+		t.Fatalf("expected export path to update, got %q", model.composition.Project.Export.Out)
+	}
+	if model.reviewMessage == "" {
+		t.Fatalf("expected review message after applying path")
+	}
+	if model.reviewPathInput != "" {
+		t.Fatalf("expected review path buffer to clear, got %q", model.reviewPathInput)
+	}
+}
+
+func TestReviewToggleFormatCycles(t *testing.T) {
+	model := NewModel()
+	model.state.Current = StepReview
+	model.composition.Project.Export.Format = domain.ExportFormatPDF
+
+	model = model.toggleExportFormat()
+	if model.composition.Project.Export.Format != domain.ExportFormatPNG {
+		t.Fatalf("expected format to toggle to PNG, got %s", model.composition.Project.Export.Format)
+	}
+
+	model = model.toggleExportFormat()
+	if model.composition.Project.Export.Format != domain.ExportFormatPDF {
+		t.Fatalf("expected format to toggle back to PDF, got %s", model.composition.Project.Export.Format)
+	}
+}
+
+func TestReviewExportRequiresPath(t *testing.T) {
+	model := NewModel()
+	model.state.Current = StepReview
+	model.composition.Project.Export.Out = ""
+
+	model = model.exportComposition()
+	if !strings.Contains(model.reviewMessage, "set an export path") {
+		t.Fatalf("expected error message about export path, got %q", model.reviewMessage)
+	}
+	if !model.reviewError {
+		t.Fatalf("expected review error to be true")
+	}
+}
+
+func TestReviewExportCallsActors(t *testing.T) {
+	model := NewModel()
+	model.state.Current = StepReview
+	model.composition.Project.Export.Out = "output/review"
+	model.composition.DecorationSelections = map[string]bool{"ribbon": true}
+
+	origResolve := resolveTemplate
+	origSave := saveProject
+	origCompose := composeAndWrite
+	defer func() {
+		resolveTemplate = origResolve
+		saveProject = origSave
+		composeAndWrite = origCompose
+	}()
+
+	resolveTemplate = func(t domain.Template, project domain.Project) (templatepkg.ResolvedTemplate, error) {
+		return templatepkg.ResolvedTemplate{TemplateID: t.ID}, nil
+	}
+
+	saved := ""
+	saveProject = func(path string, project domain.Project) error {
+		saved = path
+		return nil
+	}
+
+	var composed export.Options
+	composeAndWrite = func(res templatepkg.ResolvedTemplate, opts export.Options) (string, error) {
+		composed = opts
+		return opts.Out + ".done", nil
+	}
+
+	model = model.exportComposition()
+
+	if saved == "" {
+		t.Fatalf("expected project to be saved")
+	}
+	if !strings.Contains(model.reviewMessage, "export saved to") {
+		t.Fatalf("unexpected review message: %q", model.reviewMessage)
+	}
+	if !composed.Decorations {
+		t.Fatalf("expected decorations flag to propagate")
+	}
+	if composed.Out != "output/review" {
+		t.Fatalf("expected export out to be output/review, got %s", composed.Out)
 	}
 }
 
