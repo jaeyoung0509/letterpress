@@ -20,6 +20,7 @@ func TestViewShowsQuickStartScaffold(t *testing.T) {
 		"Edit Content",
 		"Style & Decorations",
 		"Review & Export",
+		"Live Preview",
 		"Template",
 		"Text file (.txt / .md)",
 		"Output",

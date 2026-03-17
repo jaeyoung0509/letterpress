@@ -22,7 +22,7 @@ func TestResolveTemplateProducesExpectedSlotData(t *testing.T) {
 		Slots: []domain.Slot{
 			{ID: "title", Type: domain.SlotTypeText, Style: "title", XMM: 20, YMM: 20, WMM: 170, HMM: 30, Required: true},
 			{ID: "body", Type: domain.SlotTypeText, Style: "body", XMM: 20, YMM: 60, WMM: 170, HMM: 150},
-			{ID: "photo", Type: domain.SlotTypeImage, XMM: 20, YMM: 220, WMM: 80, HMM: 80, Required: true},
+			{ID: "photo", Type: domain.SlotTypeImage, XMM: 20, YMM: 200, WMM: 80, HMM: 60, Required: true},
 			{ID: "ornament", Type: domain.SlotTypeDecoration},
 		},
 		Assets: []domain.Asset{
@@ -140,6 +140,37 @@ func TestResolveTemplateSupportsCommonTextSlotAliases(t *testing.T) {
 	}
 	if slots["signoff"].Text != project.Content.Signature {
 		t.Fatalf("signoff slot text = %q, want %q", slots["signoff"].Text, project.Content.Signature)
+	}
+}
+
+func TestResolveTemplateRejectsSlotsOutsideResolvedPage(t *testing.T) {
+	template := domain.Template{
+		ID: "bad-card",
+		Page: domain.TemplatePage{
+			SupportedSizes:     []domain.PageSize{domain.PageSizeA6},
+			DefaultOrientation: domain.OrientationLandscape,
+		},
+		Slots: []domain.Slot{
+			{ID: "note", Type: domain.SlotTypeText, XMM: 10, YMM: 100, WMM: 120, HMM: 20},
+		},
+	}
+
+	project := domain.Project{
+		Version:  domain.CurrentSchemaVersion,
+		Template: template.ID,
+		Page: domain.ProjectPage{
+			Size:        domain.PageSizeA6,
+			Orientation: domain.OrientationLandscape,
+		},
+		Content: domain.Content{
+			Body: "text",
+		},
+	}
+
+	if _, err := Resolve(template, project); err == nil {
+		t.Fatal("expected Resolve to reject out-of-bounds slots")
+	} else if !strings.Contains(err.Error(), "page bounds") {
+		t.Fatalf("expected bounds error, got %q", err)
 	}
 }
 

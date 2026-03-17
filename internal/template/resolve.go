@@ -39,6 +39,14 @@ func Resolve(template domain.Template, project domain.Project) (ResolvedTemplate
 		return ResolvedTemplate{}, err
 	}
 
+	pageDimensions, err := domain.ISOPage(pageSize, orientation)
+	if err != nil {
+		return ResolvedTemplate{}, err
+	}
+	if err := validateSlotBounds(template.Slots, pageDimensions); err != nil {
+		return ResolvedTemplate{}, err
+	}
+
 	assets := make(map[string]domain.Asset, len(template.Assets))
 	for _, asset := range template.Assets {
 		assets[asset.ID] = asset
@@ -147,6 +155,27 @@ func containsSize(sizes []domain.PageSize, size domain.PageSize) bool {
 		}
 	}
 	return false
+}
+
+func validateSlotBounds(slots []domain.Slot, dimensions domain.Dimensions) error {
+	maxWidth := float64(dimensions.WidthMM)
+	maxHeight := float64(dimensions.HeightMM)
+
+	for _, slot := range slots {
+		if slot.XMM < 0 || slot.YMM < 0 {
+			return fmt.Errorf("slot %s must stay within the page bounds", slot.ID)
+		}
+		if slot.XMM+slot.WMM > maxWidth || slot.YMM+slot.HMM > maxHeight {
+			return fmt.Errorf(
+				"slot %s exceeds the page bounds for %.0fmm x %.0fmm",
+				slot.ID,
+				maxWidth,
+				maxHeight,
+			)
+		}
+	}
+
+	return nil
 }
 
 func isValidOrientation(value domain.Orientation) bool {

@@ -10,22 +10,22 @@ slots:
     type: image
     x_mm: 10
     y_mm: 10
-    w_mm: 120
-    h_mm: 80
+    w_mm: 128
+    h_mm: 48
     fit: contain
   - id: greeting
     type: text
-    x_mm: 10
-    y_mm: 95
-    w_mm: 120
-    h_mm: 20
+    x_mm: 12
+    y_mm: 63
+    w_mm: 124
+    h_mm: 12
     style: greeting
   - id: note
     type: text
-    x_mm: 10
-    y_mm: 118
-    w_mm: 120
-    h_mm: 25
+    x_mm: 12
+    y_mm: 78
+    w_mm: 124
+    h_mm: 16
     style: note
 assets:
   - id: ribbon
