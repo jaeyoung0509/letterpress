@@ -2,6 +2,7 @@ package template
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/jaeyoung0509/letterpress/internal/domain"
 )
@@ -153,12 +154,12 @@ func isValidOrientation(value domain.Orientation) bool {
 }
 
 func resolveTextContent(content domain.Content, slotID string) string {
-	switch slotID {
-	case "title":
+	switch strings.ToLower(strings.TrimSpace(slotID)) {
+	case "title", "heading", "headline", "greeting":
 		return content.Title
-	case "body":
+	case "body", "message", "note":
 		return content.Body
-	case "signature":
+	case "signature", "signoff", "closing":
 		return content.Signature
 	default:
 		return ""

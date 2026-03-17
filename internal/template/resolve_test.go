@@ -99,6 +99,50 @@ func TestResolveTemplateMissingRequiredImage(t *testing.T) {
 	}
 }
 
+func TestResolveTemplateSupportsCommonTextSlotAliases(t *testing.T) {
+	template := domain.Template{
+		ID: "note-card",
+		Page: domain.TemplatePage{
+			SupportedSizes: []domain.PageSize{domain.PageSizeA6},
+		},
+		Slots: []domain.Slot{
+			{ID: "greeting", Type: domain.SlotTypeText, Required: true},
+			{ID: "note", Type: domain.SlotTypeText, Required: true},
+			{ID: "signoff", Type: domain.SlotTypeText, Required: true},
+		},
+	}
+
+	project := domain.Project{
+		Version:  domain.CurrentSchemaVersion,
+		Template: template.ID,
+		Page: domain.ProjectPage{
+			Size:        domain.PageSizeA6,
+			Orientation: domain.OrientationLandscape,
+		},
+		Content: domain.Content{
+			Title:     "For You",
+			Body:      "A short note that should fill the card body slot.",
+			Signature: "Warmly, Alex",
+		},
+	}
+
+	resolved, err := Resolve(template, project)
+	if err != nil {
+		t.Fatalf("Resolve returned an error: %v", err)
+	}
+
+	slots := mapSlots(resolved.Slots)
+	if slots["greeting"].Text != project.Content.Title {
+		t.Fatalf("greeting slot text = %q, want %q", slots["greeting"].Text, project.Content.Title)
+	}
+	if slots["note"].Text != project.Content.Body {
+		t.Fatalf("note slot text = %q, want %q", slots["note"].Text, project.Content.Body)
+	}
+	if slots["signoff"].Text != project.Content.Signature {
+		t.Fatalf("signoff slot text = %q, want %q", slots["signoff"].Text, project.Content.Signature)
+	}
+}
+
 func mapSlots(slots []ResolvedSlot) map[string]ResolvedSlot {
 	result := make(map[string]ResolvedSlot, len(slots))
 	for _, slot := range slots {
