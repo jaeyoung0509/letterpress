@@ -52,6 +52,14 @@ const (
 	DitherModeFloyd DitherMode = "floyd"
 )
 
+type FillFont string
+
+const (
+	FillFontPlain  FillFont = "plain"
+	FillFontRepeat FillFont = "repeat"
+	FillFontBlock  FillFont = "block"
+)
+
 type SlotType string
 
 const (
@@ -133,6 +141,7 @@ type ASCIIOptions struct {
 	Charset       string     `yaml:"charset,omitempty"`
 	ToneCharset   string     `yaml:"tone_charset,omitempty"`
 	FillText      string     `yaml:"fill_text,omitempty"`
+	FillFont      FillFont   `yaml:"fill_font,omitempty"`
 	Density       int        `yaml:"density,omitempty"`
 	Threshold     float64    `yaml:"threshold,omitempty"`
 	Contrast      float64    `yaml:"contrast,omitempty"`
@@ -156,6 +165,13 @@ func (o ASCIIOptions) EffectiveToneCharset() string {
 		return o.ToneCharset
 	}
 	return o.Charset
+}
+
+func (o ASCIIOptions) EffectiveFillFont() FillFont {
+	if o.FillFont == "" {
+		return FillFontPlain
+	}
+	return o.FillFont
 }
 
 type Template struct {

@@ -73,6 +73,7 @@ func TestProjectValidateRejectsInvalidASCIIOptions(t *testing.T) {
 				EdgeWeight:    2,
 				EdgeThreshold: 2,
 				Dither:        "blue-noise",
+				FillFont:      "shadow",
 				CellAspect:    -0.2,
 			},
 		},
@@ -93,6 +94,7 @@ func TestProjectValidateRejectsInvalidASCIIOptions(t *testing.T) {
 		"options.ascii.edge_weight: must be between 0 and 1",
 		"options.ascii.edge_threshold: must be between 0 and 1",
 		"options.ascii.dither: must be off or floyd",
+		"options.ascii.fill_font: must be plain, repeat, or block",
 		"options.ascii.cell_aspect: must be greater than or equal to 0",
 	} {
 		if !strings.Contains(err.Error(), fragment) {
@@ -115,6 +117,7 @@ func TestProjectValidateAcceptsASCIIOptions(t *testing.T) {
 				Mode:          ASCIIModeHybrid,
 				ToneCharset:   "@# ",
 				FillText:      "Happy Birthday",
+				FillFont:      FillFontBlock,
 				Density:       96,
 				Threshold:     0.42,
 				Contrast:      1.25,

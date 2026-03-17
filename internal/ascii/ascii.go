@@ -39,6 +39,7 @@ type Art struct {
 	Height   int
 	Charset  string
 	FillText string
+	FillFont domain.FillFont
 	Lines    []string
 	Cells    [][]Cell
 }
@@ -59,6 +60,8 @@ type options struct {
 	mode            domain.ASCIIMode
 	toneCharset     []rune
 	fillText        []rune
+	fillFont        domain.FillFont
+	fillTile        []string
 	density         int
 	threshold       float64
 	contrast        float64
@@ -124,7 +127,7 @@ func RenderImage(img image.Image, config domain.ASCIIOptions) (Art, error) {
 			occupied := occupancy[y][x]
 			signal := toneSignals[y][x]
 
-			glyph := renderGlyph(opts, signal, edge, occupied, &fillCursor)
+			glyph := renderGlyph(opts, x, y, signal, edge, occupied, &fillCursor)
 			cells[y][x] = Cell{
 				Glyph:     glyph,
 				Luminance: lum,
@@ -144,6 +147,7 @@ func RenderImage(img image.Image, config domain.ASCIIOptions) (Art, error) {
 		Height:   rows,
 		Charset:  string(opts.toneCharset),
 		FillText: string(opts.fillText),
+		FillFont: opts.fillFont,
 		Lines:    lines,
 		Cells:    cells,
 	}, nil
@@ -162,6 +166,7 @@ func normalize(config domain.ASCIIOptions) options {
 	}
 
 	fillText := []rune(normalizeFillText(config.FillText))
+	fillFont := config.EffectiveFillFont()
 
 	density := config.Density
 	if density <= 0 {
@@ -197,6 +202,8 @@ func normalize(config domain.ASCIIOptions) options {
 		mode:            mode,
 		toneCharset:     toneCharset,
 		fillText:        fillText,
+		fillFont:        fillFont,
+		fillTile:        buildFillTile(fillFont, string(fillText)),
 		density:         density,
 		threshold:       clamp01(config.Threshold),
 		contrast:        contrast,
@@ -481,7 +488,7 @@ func quantizeSignal(value float64, levels int) float64 {
 	return float64(index) / float64(levels-1)
 }
 
-func renderGlyph(opts options, signal, edge float64, occupied bool, fillCursor *int) rune {
+func renderGlyph(opts options, x, y int, signal, edge float64, occupied bool, fillCursor *int) rune {
 	switch opts.mode {
 	case domain.ASCIIModeOutline:
 		if edge < opts.edgeThreshold {
@@ -490,7 +497,7 @@ func renderGlyph(opts options, signal, edge float64, occupied bool, fillCursor *
 		return selectGlyph(opts.toneCharset, clamp01(1-edge))
 	case domain.ASCIIModeFill:
 		if occupied {
-			return nextFillRune(opts.fillText, fillCursor)
+			return fillRuneAt(opts, x, y, fillCursor)
 		}
 		return ' '
 	case domain.ASCIIModeHybrid, domain.ASCIIModeVector:
@@ -498,7 +505,7 @@ func renderGlyph(opts options, signal, edge float64, occupied bool, fillCursor *
 			return selectGlyph(opts.toneCharset, clamp01(1-edge))
 		}
 		if occupied {
-			return nextFillRune(opts.fillText, fillCursor)
+			return fillRuneAt(opts, x, y, fillCursor)
 		}
 		return ' '
 	case domain.ASCIIModeTone:
@@ -508,6 +515,16 @@ func renderGlyph(opts options, signal, edge float64, occupied bool, fillCursor *
 	}
 }
 
+func fillRuneAt(opts options, x, y int, cursor *int) rune {
+	switch opts.fillFont {
+	case domain.FillFontRepeat, domain.FillFontBlock:
+		if glyph, ok := tileRune(opts.fillTile, x, y); ok {
+			return glyph
+		}
+	}
+	return nextFillRune(opts.fillText, cursor)
+}
+
 func nextFillRune(fill []rune, cursor *int) rune {
 	if len(fill) == 0 {
 		fill = []rune(DefaultFillText)
@@ -515,6 +532,17 @@ func nextFillRune(fill []rune, cursor *int) rune {
 	r := fill[*cursor%len(fill)]
 	*cursor++
 	return r
+}
+
+func tileRune(tile []string, x, y int) (rune, bool) {
+	if len(tile) == 0 {
+		return 0, false
+	}
+	row := []rune(tile[y%len(tile)])
+	if len(row) == 0 {
+		return 0, false
+	}
+	return row[x%len(row)], true
 }
 
 func ExtractContourSegments(art Art, edgeThreshold float64) []Segment {
@@ -703,6 +731,126 @@ func normalizeFillText(value string) string {
 	value = strings.NewReplacer("\r", " ", "\n", " ", "\t", " ").Replace(value)
 	value = strings.Join(strings.Fields(value), " ")
 	return value
+}
+
+func buildFillTile(font domain.FillFont, fillText string) []string {
+	switch font {
+	case domain.FillFontRepeat:
+		return buildRepeatTile(fillText)
+	case domain.FillFontBlock:
+		return buildBlockTile(fillText)
+	default:
+		return nil
+	}
+}
+
+func buildRepeatTile(fillText string) []string {
+	fillText = normalizeFillText(fillText)
+	if fillText == "" {
+		fillText = DefaultFillText
+	}
+	return []string{fillText + " "}
+}
+
+func buildBlockTile(fillText string) []string {
+	fillText = strings.ToUpper(normalizeFillText(fillText))
+	if fillText == "" {
+		fillText = DefaultFillText
+	}
+
+	rows := make([]strings.Builder, 5)
+	runes := []rune(fillText)
+	for i, r := range runes {
+		pattern := blockPatternForRune(r)
+		mark := blockMarkRune(r)
+		for rowIndex, rowPattern := range pattern {
+			for _, cell := range rowPattern {
+				if cell != ' ' {
+					rows[rowIndex].WriteRune(mark)
+				} else {
+					rows[rowIndex].WriteRune(' ')
+				}
+			}
+			if i < len(runes)-1 {
+				rows[rowIndex].WriteRune(' ')
+			}
+		}
+	}
+
+	lines := make([]string, 5)
+	for i := range rows {
+		lines[i] = rows[i].String()
+	}
+	return lines
+}
+
+func blockMarkRune(r rune) rune {
+	switch {
+	case r == ' ':
+		return ' '
+	case r >= 'A' && r <= 'Z':
+		return r
+	case r >= '0' && r <= '9':
+		return r
+	default:
+		return '#'
+	}
+}
+
+func blockPatternForRune(r rune) []string {
+	if pattern, ok := blockAlphabet[r]; ok {
+		return pattern
+	}
+	return []string{
+		"###",
+		"# #",
+		"# #",
+		"# #",
+		"###",
+	}
+}
+
+var blockAlphabet = map[rune][]string{
+	' ': {"   ", "   ", "   ", "   ", "   "},
+	'!': {" # ", " # ", " # ", "   ", " # "},
+	'.': {"   ", "   ", "   ", "   ", " # "},
+	'-': {"   ", "   ", "###", "   ", "   "},
+	'0': {"###", "# #", "# #", "# #", "###"},
+	'1': {" # ", "## ", " # ", " # ", "###"},
+	'2': {"###", "  #", "###", "#  ", "###"},
+	'3': {"###", "  #", " ##", "  #", "###"},
+	'4': {"# #", "# #", "###", "  #", "  #"},
+	'5': {"###", "#  ", "###", "  #", "###"},
+	'6': {"###", "#  ", "###", "# #", "###"},
+	'7': {"###", "  #", "  #", " # ", " # "},
+	'8': {"###", "# #", "###", "# #", "###"},
+	'9': {"###", "# #", "###", "  #", "###"},
+	'A': {"###", "# #", "###", "# #", "# #"},
+	'B': {"## ", "# #", "## ", "# #", "## "},
+	'C': {"###", "#  ", "#  ", "#  ", "###"},
+	'D': {"## ", "# #", "# #", "# #", "## "},
+	'E': {"###", "#  ", "## ", "#  ", "###"},
+	'F': {"###", "#  ", "## ", "#  ", "#  "},
+	'G': {"###", "#  ", "# #", "# #", "###"},
+	'H': {"# #", "# #", "###", "# #", "# #"},
+	'I': {"###", " # ", " # ", " # ", "###"},
+	'J': {"###", "  #", "  #", "# #", "###"},
+	'K': {"# #", "# #", "## ", "# #", "# #"},
+	'L': {"#  ", "#  ", "#  ", "#  ", "###"},
+	'M': {"# #", "###", "###", "# #", "# #"},
+	'N': {"# #", "###", "###", "###", "# #"},
+	'O': {"###", "# #", "# #", "# #", "###"},
+	'P': {"###", "# #", "###", "#  ", "#  "},
+	'Q': {"###", "# #", "# #", "###", "  #"},
+	'R': {"###", "# #", "###", "## ", "# #"},
+	'S': {"###", "#  ", "###", "  #", "###"},
+	'T': {"###", " # ", " # ", " # ", " # "},
+	'U': {"# #", "# #", "# #", "# #", "###"},
+	'V': {"# #", "# #", "# #", "# #", " # "},
+	'W': {"# #", "# #", "###", "###", "# #"},
+	'X': {"# #", "# #", " # ", "# #", "# #"},
+	'Y': {"# #", "# #", "###", " # ", " # "},
+	'Z': {"###", "  #", " # ", "#  ", "###"},
 }
 
 func at(grid [][]float64, x, y int) float64 {

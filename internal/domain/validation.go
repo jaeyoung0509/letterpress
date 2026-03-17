@@ -83,6 +83,9 @@ func (p Project) Validate() error {
 	if p.Options.ASCII.Dither != "" && !p.Options.ASCII.Dither.valid() {
 		errs = errs.add("options.ascii.dither", "must be off or floyd")
 	}
+	if p.Options.ASCII.FillFont != "" && !p.Options.ASCII.FillFont.valid() {
+		errs = errs.add("options.ascii.fill_font", "must be plain, repeat, or block")
+	}
 	if p.Options.ASCII.CellAspect < 0 {
 		errs = errs.add("options.ascii.cell_aspect", "must be greater than or equal to 0")
 	}
@@ -255,6 +258,15 @@ func (m ASCIIMode) valid() bool {
 func (m DitherMode) valid() bool {
 	switch m {
 	case DitherModeOff, DitherModeFloyd:
+		return true
+	default:
+		return false
+	}
+}
+
+func (f FillFont) valid() bool {
+	switch f {
+	case FillFontPlain, FillFontRepeat, FillFontBlock:
 		return true
 	default:
 		return false

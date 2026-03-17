@@ -105,6 +105,7 @@ func TestRenderImageSeparatesFillTextFromToneCharset(t *testing.T) {
 		Mode:        domain.ASCIIModeFill,
 		ToneCharset: "@ ",
 		FillText:    "HI",
+		FillFont:    domain.FillFontPlain,
 		Density:     4,
 	})
 	if err != nil {
@@ -114,11 +115,58 @@ func TestRenderImageSeparatesFillTextFromToneCharset(t *testing.T) {
 	if art.FillText != "HI" {
 		t.Fatalf("art.FillText = %q, want %q", art.FillText, "HI")
 	}
+	if art.FillFont != domain.FillFontPlain {
+		t.Fatalf("art.FillFont = %q, want %q", art.FillFont, domain.FillFontPlain)
+	}
 	if art.Charset != "@ " {
 		t.Fatalf("art.Charset = %q, want %q", art.Charset, "@ ")
 	}
 	if !strings.Contains(art.String(), "H") || !strings.Contains(art.String(), "I") {
 		t.Fatalf("expected fill text glyphs in art, got %q", art.String())
+	}
+}
+
+func TestRenderImageRepeatFillFontRepeatsRowPattern(t *testing.T) {
+	img := twoToneImage()
+
+	art, err := RenderImage(img, domain.ASCIIOptions{
+		Mode:      domain.ASCIIModeFill,
+		FillText:  "HI",
+		FillFont:  domain.FillFontRepeat,
+		Density:   4,
+		Threshold: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("RenderImage() error = %v", err)
+	}
+
+	if got := art.Lines[0]; got != "HI  " {
+		t.Fatalf("art.Lines[0] = %q, want %q", got, "HI  ")
+	}
+	if got := art.Lines[1]; got != "HI  " {
+		t.Fatalf("art.Lines[1] = %q, want %q", got, "HI  ")
+	}
+}
+
+func TestRenderImageBlockFillFontProducesBlockPattern(t *testing.T) {
+	img := twoToneImage()
+
+	art, err := RenderImage(img, domain.ASCIIOptions{
+		Mode:      domain.ASCIIModeFill,
+		FillText:  "A",
+		FillFont:  domain.FillFontBlock,
+		Density:   10,
+		Threshold: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("RenderImage() error = %v", err)
+	}
+
+	if !strings.Contains(art.String(), "AAA") {
+		t.Fatalf("expected block letter pattern in art, got %q", art.String())
+	}
+	if !strings.Contains(art.String(), "A A") {
+		t.Fatalf("expected hollow block pattern in art, got %q", art.String())
 	}
 }
 

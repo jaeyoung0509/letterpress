@@ -180,6 +180,16 @@ func TestModeCommandAcceptsVectorMode(t *testing.T) {
 	}
 }
 
+func TestFillFontCommandUpdatesASCIIStyle(t *testing.T) {
+	model := NewModel()
+	model.commandInput.SetValue("/fill-font block")
+	model = model.executeCurrentCommand()
+
+	if model.draft.ASCII.FillFont != domain.FillFontBlock {
+		t.Fatalf("fill font = %q", model.draft.ASCII.FillFont)
+	}
+}
+
 func TestHeaderAndPromptRemainVisibleWithPreviewContent(t *testing.T) {
 	model := NewModel()
 	model.width = 100
@@ -234,6 +244,9 @@ func TestExportCommandDelegatesToASCIIExporter(t *testing.T) {
 	}
 	if gotASCII.FillText != "HELLO" {
 		t.Fatalf("fill text = %q, want %q", gotASCII.FillText, "HELLO")
+	}
+	if gotASCII.FillFont != domain.FillFontPlain {
+		t.Fatalf("fill font = %q, want %q", gotASCII.FillFont, domain.FillFontPlain)
 	}
 	if gotASCII.EffectiveToneCharset() == "HELLO" {
 		t.Fatalf("tone charset should not be derived from fill text")

@@ -32,6 +32,9 @@ var commandCatalog = []string{
 	"/image ",
 	"/fill-file ",
 	`/fill-text "Happy Birthday"`,
+	"/fill-font plain",
+	"/fill-font repeat",
+	"/fill-font block",
 	"/mode tone",
 	"/mode outline",
 	"/mode fill",
@@ -113,6 +116,7 @@ func newDraft() Draft {
 		},
 		ASCII: domain.ASCIIOptions{
 			Mode:       domain.ASCIIModeTone,
+			FillFont:   domain.FillFontPlain,
 			Density:    80,
 			Dither:     domain.DitherModeOff,
 			CellAspect: asciiDefaultCellAspect(),
@@ -127,6 +131,7 @@ func (d Draft) EffectiveASCIIOptions() domain.ASCIIOptions {
 	if strings.TrimSpace(options.FillText) == "" {
 		options.FillText = normalizeFillText(d.Text)
 	}
+	options.FillFont = options.EffectiveFillFont()
 	return options
 }
 
@@ -145,6 +150,10 @@ func (d Draft) FillLabel() string {
 		return summarizeText(normalizeFillText(d.Text))
 	}
 	return "not set"
+}
+
+func (d Draft) FillFontLabel() string {
+	return string(d.EffectiveASCIIOptions().EffectiveFillFont())
 }
 
 type slashCommand struct {
@@ -411,7 +420,7 @@ func tokenizeCommand(input string) ([]string, error) {
 func (m *Model) applyCommand(command slashCommand) error {
 	switch command.Name {
 	case "help":
-		m.setStatus("Commands: /image /fill-file /fill-text /mode /tone-charset /density /threshold /gamma /edge-threshold /dither /cell-aspect /export", false)
+		m.setStatus("Commands: /image /fill-file /fill-text /fill-font /mode /tone-charset /density /threshold /gamma /edge-threshold /dither /cell-aspect /export", false)
 		return nil
 	case "image":
 		if len(command.Args) != 1 {
@@ -447,6 +456,20 @@ func (m *Model) applyCommand(command slashCommand) error {
 		m.draft.ASCII.FillText = ""
 		m.refreshPreview()
 		m.setStatus("Fill text updated.", false)
+		return nil
+	case "fill-font", "font":
+		if len(command.Args) != 1 {
+			return fmt.Errorf("usage: /fill-font <plain|repeat|block>")
+		}
+		fillFont := domain.FillFont(strings.ToLower(command.Args[0]))
+		switch fillFont {
+		case domain.FillFontPlain, domain.FillFontRepeat, domain.FillFontBlock:
+			m.draft.ASCII.FillFont = fillFont
+		default:
+			return fmt.Errorf("fill-font must be plain, repeat, or block")
+		}
+		m.refreshPreview()
+		m.setStatus(fmt.Sprintf("Fill font set to %s.", fillFont), false)
 		return nil
 	case "mode":
 		if len(command.Args) != 1 {
@@ -1049,6 +1072,7 @@ func (m Model) renderHeaderBody() string {
 	sources := []string{
 		fmt.Sprintf("image %s", summarizeText(m.draft.ImagePath)),
 		fmt.Sprintf("fill %s", m.draft.FillLabel()),
+		fmt.Sprintf("font %s", m.draft.FillFontLabel()),
 		fmt.Sprintf("tone %s", m.draft.ToneLabel()),
 		fmt.Sprintf("dither %s", effectiveDither(m.draft.ASCII.Dither)),
 	}
@@ -1118,8 +1142,9 @@ func (m Model) previewContent(width int) string {
 			"",
 			"1. /image ./test.png",
 			"2. /fill-file ./test.txt",
-			"3. /mode hybrid",
-			"4. /export pdf ./exports/out.pdf",
+			"3. /fill-font block",
+			"4. /mode hybrid",
+			"5. /export pdf ./exports/out.pdf",
 			"",
 			"Tab completes matching commands and file paths.",
 		}
@@ -1152,7 +1177,7 @@ func (m Model) renderPromptPane(width int) string {
 		lines = append(lines, mutedStyle.Render("picker"), mutedStyle.Render("  no suggestions"))
 	}
 
-	lines = append(lines, mutedStyle.Width(width).Render(`examples: /image test  ·  /fill-file test  ·  /mode hybrid  ·  /tone-charset "@%#*+=-:. "`))
+	lines = append(lines, mutedStyle.Width(width).Render(`examples: /image test  ·  /fill-file test  ·  /fill-font block  ·  /mode hybrid`))
 	return strings.Join(lines, "\n")
 }
 
